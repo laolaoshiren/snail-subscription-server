@@ -26,6 +26,7 @@ const {
 const HOST = process.env.HOST || "0.0.0.0";
 const PORT = Number.parseInt(process.env.PORT || "3000", 10);
 const DEFAULT_INVITE_CODE = (process.env.INVITE_CODE || process.env.DEFAULT_INVITE_CODE || "").trim();
+const PUBLIC_ORIGIN = normalizeConfiguredOrigin(process.env.PUBLIC_ORIGIN || "");
 const SESSION_COOKIE_NAME = "snail_session";
 const SESSION_TTL_MS = 1000 * 60 * 60 * 12;
 const RELAY_FETCH_TIMEOUT_MS = Number.parseInt(process.env.RELAY_FETCH_TIMEOUT_MS || "30000", 10);
@@ -47,6 +48,21 @@ const FORWARDED_HEADERS = new Set([
 ]);
 
 let registrationQueue = Promise.resolve();
+
+function normalizeConfiguredOrigin(input) {
+  const value = (input || "").toString().trim();
+  if (!value) {
+    return "";
+  }
+
+  try {
+    const url = new URL(value);
+    const pathname = url.pathname.replace(/\/+$/, "");
+    return `${url.origin}${pathname}`;
+  } catch (error) {
+    return "";
+  }
+}
 
 function sendJson(response, statusCode, payload, headers = {}) {
   response.writeHead(statusCode, {
@@ -79,6 +95,10 @@ async function serveStaticFile(response, fileName, contentType) {
 }
 
 function getRequestOrigin(request) {
+  if (PUBLIC_ORIGIN) {
+    return PUBLIC_ORIGIN;
+  }
+
   const forwardedProto = request.headers["x-forwarded-proto"];
   const proto = forwardedProto
     ? forwardedProto.toString().split(",")[0].trim()

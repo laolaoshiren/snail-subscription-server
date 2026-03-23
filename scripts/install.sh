@@ -15,6 +15,7 @@ RELAY_FETCH_TIMEOUT_MS="${RELAY_FETCH_TIMEOUT_MS:-}"
 MAX_RETRIES="${MAX_RETRIES:-}"
 RETRY_DELAY_MS="${RETRY_DELAY_MS:-}"
 FETCH_TIMEOUT_MS="${FETCH_TIMEOUT_MS:-}"
+PUBLIC_ORIGIN_INPUT="${PUBLIC_ORIGIN:-}"
 PORT_INPUT="${PORT:-}"
 PASSWORD_INPUT="${PANEL_PASSWORD:-}"
 
@@ -27,6 +28,7 @@ CURRENT_RELAY_FETCH_TIMEOUT_MS=""
 CURRENT_MAX_RETRIES=""
 CURRENT_RETRY_DELAY_MS=""
 CURRENT_FETCH_TIMEOUT_MS=""
+CURRENT_PUBLIC_ORIGIN=""
 PANEL_PASSWORD_RESULT=""
 PASSWORD_CHANGED="0"
 BACKUP_DIR=""
@@ -106,6 +108,7 @@ load_existing_env() {
   CURRENT_MAX_RETRIES="$(awk -F= '$1=="MAX_RETRIES" {print substr($0, index($0, "=") + 1); exit}' "${ENV_FILE}")"
   CURRENT_RETRY_DELAY_MS="$(awk -F= '$1=="RETRY_DELAY_MS" {print substr($0, index($0, "=") + 1); exit}' "${ENV_FILE}")"
   CURRENT_FETCH_TIMEOUT_MS="$(awk -F= '$1=="FETCH_TIMEOUT_MS" {print substr($0, index($0, "=") + 1); exit}' "${ENV_FILE}")"
+  CURRENT_PUBLIC_ORIGIN="$(awk -F= '$1=="PUBLIC_ORIGIN" {print substr($0, index($0, "=") + 1); exit}' "${ENV_FILE}")"
 }
 
 install_base_packages() {
@@ -192,6 +195,29 @@ server.listen(0, "0.0.0.0", () => {
   server.close();
 });
 NODE
+}
+
+detect_public_ip() {
+  local url=""
+  local value=""
+
+  for url in \
+    "https://4.ipw.cn" \
+    "https://ipv4.icanhazip.com" \
+    "https://api.ipify.org" \
+    "https://ifconfig.me/ip"; do
+    value="$(curl -4fsSL --max-time 5 "${url}" 2>/dev/null | tr -d '\r\n ' || true)"
+    if printf '%s' "${value}" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$'; then
+      printf '%s' "${value}"
+      return 0
+    fi
+  done
+
+  return 1
+}
+
+extract_host_from_origin() {
+  printf '%s' "$1" | sed -E 's#^[a-zA-Z]+://([^/:]+).*$#\1#'
 }
 
 validate_port() {
@@ -281,6 +307,29 @@ apply_default_env_values() {
   FETCH_TIMEOUT_MS="${FETCH_TIMEOUT_MS:-${CURRENT_FETCH_TIMEOUT_MS:-15000}}"
 }
 
+resolve_public_origin() {
+  local host=""
+  local detected_ip=""
+
+  if [ -n "${PUBLIC_ORIGIN_INPUT}" ]; then
+    printf '%s' "${PUBLIC_ORIGIN_INPUT%/}"
+    return
+  fi
+
+  if [ -n "${CURRENT_PUBLIC_ORIGIN}" ]; then
+    host="$(extract_host_from_origin "${CURRENT_PUBLIC_ORIGIN}")"
+  fi
+
+  if [ -z "${host}" ]; then
+    detected_ip="$(detect_public_ip || true)"
+    host="${detected_ip}"
+  fi
+
+  if [ -n "${host}" ]; then
+    printf 'http://%s:%s' "${host}" "${PORT_INPUT}"
+  fi
+}
+
 stop_existing_service() {
   if systemctl list-unit-files "${SERVICE_NAME}.service" >/dev/null 2>&1; then
     systemctl stop "${SERVICE_NAME}" >/dev/null 2>&1 || true
@@ -325,6 +374,9 @@ restore_backup_data() {
 }
 
 write_env_file() {
+  local public_origin
+  public_origin="$(resolve_public_origin)"
+
   cat > "${ENV_FILE}" <<EOF
 PORT=${PORT_INPUT}
 HOST=${HOST}
@@ -335,6 +387,7 @@ RELAY_FETCH_TIMEOUT_MS=${RELAY_FETCH_TIMEOUT_MS}
 MAX_RETRIES=${MAX_RETRIES}
 RETRY_DELAY_MS=${RETRY_DELAY_MS}
 FETCH_TIMEOUT_MS=${FETCH_TIMEOUT_MS}
+PUBLIC_ORIGIN=${public_origin}
 EOF
 
   chmod 600 "${ENV_FILE}"
@@ -384,7 +437,9 @@ EOF
 }
 
 print_summary() {
+  local public_origin
   local health_url
+  public_origin="$(resolve_public_origin)"
   health_url="http://127.0.0.1:${PORT_INPUT}/api/health"
 
   log "部署完成"
@@ -392,7 +447,11 @@ print_summary() {
   log "服务名: ${SERVICE_NAME}"
   log "项目目录: ${APP_DIR}"
   log "环境文件: ${ENV_FILE}"
-  log "面板地址: http://服务器IP:${PORT_INPUT}"
+  if [ -n "${public_origin}" ]; then
+    log "面板地址: ${public_origin}"
+  else
+    log "面板地址: 未能自动探测公网 IP，请手动确认服务器公网地址"
+  fi
   log "健康检查: ${health_url}"
 
   if [ "${PASSWORD_CHANGED}" = "1" ]; then

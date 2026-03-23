@@ -15,6 +15,7 @@ RELAY_FETCH_TIMEOUT_MS="${RELAY_FETCH_TIMEOUT_MS:-}"
 MAX_RETRIES="${MAX_RETRIES:-}"
 RETRY_DELAY_MS="${RETRY_DELAY_MS:-}"
 FETCH_TIMEOUT_MS="${FETCH_TIMEOUT_MS:-}"
+PUBLIC_ORIGIN_INPUT="${PUBLIC_ORIGIN:-}"
 PORT_INPUT="${PORT:-}"
 PASSWORD_INPUT="${PANEL_PASSWORD:-}"
 
@@ -27,6 +28,7 @@ CURRENT_RELAY_FETCH_TIMEOUT_MS=""
 CURRENT_MAX_RETRIES=""
 CURRENT_RETRY_DELAY_MS=""
 CURRENT_FETCH_TIMEOUT_MS=""
+CURRENT_PUBLIC_ORIGIN=""
 PANEL_PASSWORD_RESULT=""
 PASSWORD_CHANGED="0"
 
@@ -41,7 +43,7 @@ fail() {
 
 require_root() {
   if [ "$(id -u)" -ne 0 ]; then
-    fail "please run as root or through sudo"
+    fail "请使用 root 或 sudo 运行安装脚本"
   fi
 }
 
@@ -105,6 +107,7 @@ load_existing_env() {
   CURRENT_MAX_RETRIES="$(awk -F= '$1=="MAX_RETRIES" {print substr($0, index($0, "=") + 1); exit}' "${ENV_FILE}")"
   CURRENT_RETRY_DELAY_MS="$(awk -F= '$1=="RETRY_DELAY_MS" {print substr($0, index($0, "=") + 1); exit}' "${ENV_FILE}")"
   CURRENT_FETCH_TIMEOUT_MS="$(awk -F= '$1=="FETCH_TIMEOUT_MS" {print substr($0, index($0, "=") + 1); exit}' "${ENV_FILE}")"
+  CURRENT_PUBLIC_ORIGIN="$(awk -F= '$1=="PUBLIC_ORIGIN" {print substr($0, index($0, "=") + 1); exit}' "${ENV_FILE}")"
 }
 
 install_base_packages() {
@@ -125,7 +128,7 @@ install_base_packages() {
     return
   fi
 
-  fail "unsupported package manager, please install curl and docker manually"
+  fail "不支持当前包管理器，请手动安装 curl 和 Docker"
 }
 
 install_docker() {
@@ -182,6 +185,29 @@ random_port() {
   done
 }
 
+detect_public_ip() {
+  local url=""
+  local value=""
+
+  for url in \
+    "https://4.ipw.cn" \
+    "https://ipv4.icanhazip.com" \
+    "https://api.ipify.org" \
+    "https://ifconfig.me/ip"; do
+    value="$(curl -4fsSL --max-time 5 "${url}" 2>/dev/null | tr -d '\r\n ' || true)"
+    if printf '%s' "${value}" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$'; then
+      printf '%s' "${value}"
+      return 0
+    fi
+  done
+
+  return 1
+}
+
+extract_host_from_origin() {
+  printf '%s' "$1" | sed -E 's#^[a-zA-Z]+://([^/:]+).*$#\1#'
+}
+
 validate_port() {
   case "$1" in
     ''|*[!0-9]*)
@@ -202,22 +228,22 @@ ask_password() {
   fi
 
   if [ "${INSTALL_MODE}" = "update" ] && [ -f "${DATA_DIR}/account.json" ]; then
-    answer="$(prompt_secret 'Set panel password, press Enter to keep the current password: ')"
+    answer="$(prompt_secret '设置面板密码，直接回车保留当前密码: ')"
     if [ -z "${answer}" ]; then
       PASSWORD_CHANGED="0"
       PANEL_PASSWORD_RESULT=""
       return
     fi
   else
-    answer="$(prompt_secret 'Set panel password, press Enter to generate a random password: ')"
+    answer="$(prompt_secret '设置面板密码，直接回车将自动生成随机密码: ')"
     if [ -z "${answer}" ]; then
       answer="$(random_password)"
-      log "generated a random panel password"
+      log "未输入面板密码，已自动生成随机密码"
     fi
   fi
 
   if [ "${#answer}" -lt 4 ]; then
-    fail "panel password must be at least 4 characters"
+    fail "面板密码至少需要 4 个字符"
   fi
 
   PANEL_PASSWORD_RESULT="${answer}"
@@ -230,29 +256,29 @@ ask_port() {
 
   if [ -n "${PORT_INPUT}" ]; then
     if ! validate_port "${PORT_INPUT}"; then
-      fail "PORT must be a number between 1 and 65535"
+      fail "PORT 必须是 1-65535 之间的数字"
     fi
     return
   fi
 
   if [ "${INSTALL_MODE}" = "update" ] && [ -n "${CURRENT_PORT}" ]; then
-    answer="$(prompt_text "Set listen port, press Enter to keep ${CURRENT_PORT}: ")"
+    answer="$(prompt_text "设置监听端口，直接回车保留当前端口 ${CURRENT_PORT}: ")"
     if [ -z "${answer}" ]; then
       PORT_INPUT="${CURRENT_PORT}"
       return
     fi
   else
-    answer="$(prompt_text 'Set listen port, press Enter to generate a random port: ')"
+    answer="$(prompt_text '设置监听端口，直接回车将自动生成随机端口: ')"
     if [ -z "${answer}" ]; then
       fallback="$(random_port)"
-      log "generated a random listen port ${fallback}"
+      log "未输入监听端口，已自动生成随机端口 ${fallback}"
       PORT_INPUT="${fallback}"
       return
     fi
   fi
 
   if ! validate_port "${answer}"; then
-    fail "listen port must be a number between 1 and 65535"
+    fail "监听端口必须是 1-65535 之间的数字"
   fi
 
   PORT_INPUT="${answer}"
@@ -268,11 +294,37 @@ apply_default_env_values() {
   FETCH_TIMEOUT_MS="${FETCH_TIMEOUT_MS:-${CURRENT_FETCH_TIMEOUT_MS:-15000}}"
 }
 
+resolve_public_origin() {
+  local host=""
+  local detected_ip=""
+
+  if [ -n "${PUBLIC_ORIGIN_INPUT}" ]; then
+    printf '%s' "${PUBLIC_ORIGIN_INPUT%/}"
+    return
+  fi
+
+  if [ -n "${CURRENT_PUBLIC_ORIGIN}" ]; then
+    host="$(extract_host_from_origin "${CURRENT_PUBLIC_ORIGIN}")"
+  fi
+
+  if [ -z "${host}" ]; then
+    detected_ip="$(detect_public_ip || true)"
+    host="${detected_ip}"
+  fi
+
+  if [ -n "${host}" ]; then
+    printf 'http://%s:%s' "${host}" "${PORT_INPUT}"
+  fi
+}
+
 prepare_directories() {
   mkdir -p "${APP_DIR}" "${DATA_DIR}"
 }
 
 write_env_file() {
+  local public_origin
+  public_origin="$(resolve_public_origin)"
+
   cat > "${ENV_FILE}" <<EOF
 PORT=${PORT_INPUT}
 HOST=${HOST}
@@ -283,6 +335,7 @@ RELAY_FETCH_TIMEOUT_MS=${RELAY_FETCH_TIMEOUT_MS}
 MAX_RETRIES=${MAX_RETRIES}
 RETRY_DELAY_MS=${RETRY_DELAY_MS}
 FETCH_TIMEOUT_MS=${FETCH_TIMEOUT_MS}
+PUBLIC_ORIGIN=${public_origin}
 EOF
 
   chmod 600 "${ENV_FILE}"
@@ -290,7 +343,7 @@ EOF
 
 pull_image() {
   if ! docker pull "${IMAGE_NAME}"; then
-    fail "failed to pull ${IMAGE_NAME}; wait for the GitHub Actions Docker workflow to finish or override IMAGE_NAME"
+    fail "拉取镜像 ${IMAGE_NAME} 失败，请等待 GitHub Actions 构建完成，或手动指定 IMAGE_NAME"
   fi
 }
 
@@ -321,22 +374,29 @@ replace_container() {
 }
 
 print_summary() {
-  log "deployment completed"
-  log "mode: ${INSTALL_MODE}"
-  log "container: ${CONTAINER_NAME}"
-  log "image: ${IMAGE_NAME}"
-  log "data dir: ${DATA_DIR}"
-  log "panel url: http://SERVER_IP:${PORT_INPUT}"
+  local public_origin
+  public_origin="$(resolve_public_origin)"
 
-  if [ "${PASSWORD_CHANGED}" = "1" ]; then
-    log "panel password: ${PANEL_PASSWORD_RESULT}"
+  log "部署完成"
+  log "模式: ${INSTALL_MODE}"
+  log "容器名: ${CONTAINER_NAME}"
+  log "镜像: ${IMAGE_NAME}"
+  log "数据目录: ${DATA_DIR}"
+  if [ -n "${public_origin}" ]; then
+    log "面板地址: ${public_origin}"
   else
-    log "panel password: kept existing password"
+    log "面板地址: 未能自动探测公网 IP，请手动确认服务器公网地址"
   fi
 
-  log "health: http://127.0.0.1:${PORT_INPUT}/api/health"
-  log "status: docker ps --filter name=${CONTAINER_NAME}"
-  log "logs: docker logs -f ${CONTAINER_NAME}"
+  if [ "${PASSWORD_CHANGED}" = "1" ]; then
+    log "面板密码: ${PANEL_PASSWORD_RESULT}"
+  else
+    log "面板密码: 保留现有密码"
+  fi
+
+  log "健康检查: http://127.0.0.1:${PORT_INPUT}/api/health"
+  log "查看状态: docker ps --filter name=${CONTAINER_NAME}"
+  log "查看日志: docker logs -f ${CONTAINER_NAME}"
 }
 
 main() {

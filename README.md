@@ -29,6 +29,7 @@ curl -fsSL https://raw.githubusercontent.com/laolaoshiren/snail-subscription-ser
 4. 更新已安装项目时，端口直接回车会保留当前端口。
 
 脚本会自动判断当前服务器是首次安装还是已有项目更新。
+脚本会优先自动探测公网 IP，并把它写入服务配置，后续面板和 API 生成的中转链接会优先使用这个公网地址。
 
 如果你不想交互，也可以通过环境变量直接传值：
 
@@ -117,6 +118,7 @@ sudo systemctl restart snail-subscription-server
 - `MAX_RETRIES`
 - `RETRY_DELAY_MS`
 - `FETCH_TIMEOUT_MS`
+- `PUBLIC_ORIGIN`
 
 默认情况下安装脚本会把 `PROXY_URL` 设为 `off`。如果你的服务器访问外网必须经过代理，请显式传入代理地址。
 
