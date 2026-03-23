@@ -4,8 +4,8 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Snail 中转订阅面板</title>
-    <link rel="stylesheet" href="/styles.css" />
-    <script defer src="/app.js"></script>
+    <link rel="stylesheet" href="/styles.css?v=20260324b" />
+    <script defer src="/app.js?v=20260324b"></script>
   </head>
   <body>
     <div class="page-shell">
@@ -52,15 +52,16 @@
 
           <div id="statusBar" class="status-bar hidden"></div>
 
-          <section id="subscriptionTab" class="tab-panel">
-            <div class="panel user-panel">
-              <div class="panel-head">
-                <h2>选择用户</h2>
-                <p>每个用户对应独立的中转 token、上游账号、流量查询和历史日志。</p>
-              </div>
-
-              <div id="userSwitcher" class="user-switcher"></div>
+          <section id="sharedUserPanel" class="panel user-panel sticky-panel">
+            <div class="panel-head">
+              <h2>选择用户</h2>
+              <p>订阅页和日志页都会基于当前用户显示，无需来回切换。</p>
             </div>
+
+            <div id="userSwitcher" class="user-switcher"></div>
+          </section>
+
+          <section id="subscriptionTab" class="tab-panel">
 
             <div class="subscription-grid">
               <div class="subscription-sidebar">

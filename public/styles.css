@@ -160,6 +160,12 @@ small {
   margin-bottom: 14px;
 }
 
+.sticky-panel {
+  position: sticky;
+  top: 12px;
+  z-index: 8;
+}
+
 .subscription-grid {
   display: grid;
   grid-template-columns: 340px minmax(0, 1fr);
@@ -501,6 +507,10 @@ code {
   .dashboard-header {
     flex-direction: column;
     align-items: flex-start;
+  }
+
+  .sticky-panel {
+    position: static;
   }
 
   .header-actions {

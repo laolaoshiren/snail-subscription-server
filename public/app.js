@@ -14,6 +14,7 @@ const tabButtons = Array.from(document.querySelectorAll("[data-tab]"));
 const subscriptionTab = document.querySelector("#subscriptionTab");
 const logsTab = document.querySelector("#logsTab");
 const settingsTab = document.querySelector("#settingsTab");
+const sharedUserPanel = document.querySelector("#sharedUserPanel");
 const userSwitcher = document.querySelector("#userSwitcher");
 const usageGrid = document.querySelector("#usageGrid");
 const usageEmptyState = document.querySelector("#usageEmptyState");
@@ -72,13 +73,45 @@ async function copyText(value) {
 }
 
 function setStatus(message, tone = "neutral") {
+  if (!statusBar) {
+    return;
+  }
+
   statusBar.textContent = message;
   statusBar.className = `status-bar tone-${tone}`;
 }
 
 function clearStatus() {
+  if (!statusBar) {
+    return;
+  }
+
   statusBar.className = "status-bar hidden";
   statusBar.textContent = "";
+}
+
+function toggleHidden(element, shouldHide) {
+  if (!element || !element.classList) {
+    return;
+  }
+
+  element.classList.toggle("hidden", shouldHide);
+}
+
+function setText(element, value) {
+  if (!element) {
+    return;
+  }
+
+  element.textContent = value;
+}
+
+function setInputValue(element, value) {
+  if (!element) {
+    return;
+  }
+
+  element.value = value;
 }
 
 function setLoading(button, loadingText, active) {
@@ -121,9 +154,10 @@ async function requestJson(url, options = {}) {
 }
 
 function activateTab(tabName) {
-  subscriptionTab.classList.toggle("hidden", tabName !== "subscription");
-  logsTab.classList.toggle("hidden", tabName !== "logs");
-  settingsTab.classList.toggle("hidden", tabName !== "settings");
+  toggleHidden(subscriptionTab, tabName !== "subscription");
+  toggleHidden(logsTab, tabName !== "logs");
+  toggleHidden(settingsTab, tabName !== "settings");
+  toggleHidden(sharedUserPanel, tabName === "settings");
 
   tabButtons.forEach((button) => {
     button.classList.toggle("active", button.dataset.tab === tabName);
@@ -131,13 +165,13 @@ function activateTab(tabName) {
 }
 
 function showLogin() {
-  loginView.classList.remove("hidden");
-  dashboardView.classList.add("hidden");
+  toggleHidden(loginView, false);
+  toggleHidden(dashboardView, true);
 }
 
 function showDashboard() {
-  loginView.classList.add("hidden");
-  dashboardView.classList.remove("hidden");
+  toggleHidden(loginView, true);
+  toggleHidden(dashboardView, false);
   activateTab("subscription");
 }
 
@@ -199,6 +233,10 @@ function describeMode(runtimeMode) {
 }
 
 function selectRuntimeMode(runtimeMode) {
+  if (!settingsForm) {
+    return;
+  }
+
   const radio = settingsForm.querySelector(`input[name="runtimeMode"][value="${runtimeMode}"]`);
   if (radio) {
     radio.checked = true;
@@ -206,24 +244,31 @@ function selectRuntimeMode(runtimeMode) {
 }
 
 function fillMeta(registration) {
-  metaEmail.textContent = registration?.email || "暂无";
-  metaPassword.textContent = registration?.password || "暂无";
-  metaInviteCode.textContent = registration?.inviteCode || "无";
-  metaCreatedAt.textContent = registration?.createdAt
+  setText(metaEmail, registration?.email || "暂无");
+  setText(metaPassword, registration?.password || "暂无");
+  setText(metaInviteCode, registration?.inviteCode || "无");
+  setText(
+    metaCreatedAt,
+    registration?.createdAt
     ? formatDateTime(registration.createdAt)
-    : "暂无";
-  metaUpstreamSite.textContent = registration?.upstreamSite || registration?.entryUrl || "暂无";
+    : "暂无",
+  );
+  setText(metaUpstreamSite, registration?.upstreamSite || registration?.entryUrl || "暂无");
 }
 
 function renderLinks(relayUrls) {
-  linksList.innerHTML = "";
-
-  if (!relayUrls) {
-    emptyState.classList.remove("hidden");
+  if (!linksList) {
     return;
   }
 
-  emptyState.classList.add("hidden");
+  linksList.innerHTML = "";
+
+  if (!relayUrls) {
+    toggleHidden(emptyState, false);
+    return;
+  }
+
+  toggleHidden(emptyState, true);
 
   Object.entries(protocolLabels).forEach(([type, label]) => {
     const url = relayUrls[type];
@@ -259,14 +304,18 @@ function renderLinks(relayUrls) {
 }
 
 function renderUsage(usage) {
-  usageGrid.innerHTML = "";
-
-  if (!usage) {
-    usageEmptyState.classList.remove("hidden");
+  if (!usageGrid) {
     return;
   }
 
-  usageEmptyState.classList.add("hidden");
+  usageGrid.innerHTML = "";
+
+  if (!usage) {
+    toggleHidden(usageEmptyState, false);
+    return;
+  }
+
+  toggleHidden(usageEmptyState, true);
 
   const cards = [
     ["最近查询", formatDateTime(usage.queriedAt)],
@@ -324,14 +373,18 @@ function buildHistoryMeta(entry) {
 }
 
 function renderHistory(history) {
-  historyList.innerHTML = "";
-
-  if (!Array.isArray(history) || history.length === 0) {
-    historyEmptyState.classList.remove("hidden");
+  if (!historyList) {
     return;
   }
 
-  historyEmptyState.classList.add("hidden");
+  historyList.innerHTML = "";
+
+  if (!Array.isArray(history) || history.length === 0) {
+    toggleHidden(historyEmptyState, false);
+    return;
+  }
+
+  toggleHidden(historyEmptyState, true);
 
   history.forEach((entry) => {
     const item = document.createElement("article");
@@ -397,6 +450,10 @@ function updateSummaryFromPayload(payload) {
 }
 
 function renderUserSwitcher() {
+  if (!userSwitcher) {
+    return;
+  }
+
   userSwitcher.innerHTML = "";
 
   state.users.forEach((user) => {
@@ -439,10 +496,10 @@ function applySession(payload) {
     state.currentUserKey = payload.defaultUserKey || state.users[0]?.key || "userA";
   }
 
-  activeUserLabel.textContent = findCurrentUser().label;
-  modeDescription.textContent = describeMode(state.runtimeMode);
+  setText(activeUserLabel, findCurrentUser().label);
+  setText(modeDescription, describeMode(state.runtimeMode));
   selectRuntimeMode(state.runtimeMode);
-  displayOriginInput.value = state.displayOrigin;
+  setInputValue(displayOriginInput, state.displayOrigin);
   renderUserSwitcher();
 }
 
@@ -450,11 +507,11 @@ function applyUserPayload(payload) {
   state.currentPayload = payload;
   state.runtimeMode = payload.runtimeMode || state.runtimeMode;
   state.trafficThresholdPercent = payload.trafficThresholdPercent || state.trafficThresholdPercent;
-  displayOriginInput.value = state.displayOrigin;
+  setInputValue(displayOriginInput, state.displayOrigin);
   state.relayUrlsByUser[state.currentUserKey] = payload.relayUrls || state.relayUrlsByUser[state.currentUserKey];
 
-  activeUserLabel.textContent = payload.user?.label || findCurrentUser().label;
-  modeDescription.textContent = describeMode(state.runtimeMode);
+  setText(activeUserLabel, payload.user?.label || findCurrentUser().label);
+  setText(modeDescription, describeMode(state.runtimeMode));
   selectRuntimeMode(state.runtimeMode);
 
   fillMeta(payload.registration);
@@ -467,7 +524,7 @@ function applyUserPayload(payload) {
 
 async function loadUserState() {
   const user = findCurrentUser();
-  activeUserLabel.textContent = user.label;
+  setText(activeUserLabel, user.label);
 
   try {
     const payload = await requestJson(
@@ -510,7 +567,8 @@ async function refreshSession() {
   }
 }
 
-loginForm.addEventListener("submit", async (event) => {
+if (loginForm) {
+  loginForm.addEventListener("submit", async (event) => {
   event.preventDefault();
   clearStatus();
   setLoading(loginButton, "登录中...", true);
@@ -531,9 +589,11 @@ loginForm.addEventListener("submit", async (event) => {
   } finally {
     setLoading(loginButton, "登录中...", false);
   }
-});
+  });
+}
 
-registerForm.addEventListener("submit", async (event) => {
+if (registerForm) {
+  registerForm.addEventListener("submit", async (event) => {
   event.preventDefault();
   clearStatus();
   setLoading(registerButton, "处理中...", true);
@@ -564,9 +624,11 @@ registerForm.addEventListener("submit", async (event) => {
   } finally {
     setLoading(registerButton, "处理中...", false);
   }
-});
+  });
+}
 
-settingsForm.addEventListener("submit", async (event) => {
+if (settingsForm) {
+  settingsForm.addEventListener("submit", async (event) => {
   event.preventDefault();
   clearStatus();
   setLoading(saveSettingsButton, "保存中...", true);
@@ -584,9 +646,9 @@ settingsForm.addEventListener("submit", async (event) => {
     state.runtimeMode = payload.runtimeMode;
     state.displayOrigin = payload.displayOrigin || "";
     state.trafficThresholdPercent = payload.trafficThresholdPercent || state.trafficThresholdPercent;
-    modeDescription.textContent = describeMode(state.runtimeMode);
+    setText(modeDescription, describeMode(state.runtimeMode));
     selectRuntimeMode(state.runtimeMode);
-    displayOriginInput.value = state.displayOrigin;
+    setInputValue(displayOriginInput, state.displayOrigin);
     await refreshSession();
     setStatus("运行模式已更新。", "success");
   } catch (error) {
@@ -600,9 +662,11 @@ settingsForm.addEventListener("submit", async (event) => {
   } finally {
     setLoading(saveSettingsButton, "保存中...", false);
   }
-});
+  });
+}
 
-passwordForm.addEventListener("submit", async (event) => {
+if (passwordForm) {
+  passwordForm.addEventListener("submit", async (event) => {
   event.preventDefault();
   clearStatus();
   setLoading(savePasswordButton, "保存中...", true);
@@ -633,23 +697,26 @@ passwordForm.addEventListener("submit", async (event) => {
   } finally {
     setLoading(savePasswordButton, "保存中...", false);
   }
-});
+  });
+}
 
-logoutButton.addEventListener("click", async () => {
-  clearStatus();
+if (logoutButton) {
+  logoutButton.addEventListener("click", async () => {
+    clearStatus();
 
-  try {
-    await requestJson("/api/logout", { method: "POST" });
-    showLogin();
-    fillMeta(null);
-    renderLinks(null);
-    renderUsage(null);
-    renderHistory([]);
-    setStatus("已退出登录。", "success");
-  } catch (error) {
-    setStatus(error.message, "error");
-  }
-});
+    try {
+      await requestJson("/api/logout", { method: "POST" });
+      showLogin();
+      fillMeta(null);
+      renderLinks(null);
+      renderUsage(null);
+      renderHistory([]);
+      setStatus("已退出登录。", "success");
+    } catch (error) {
+      setStatus(error.message, "error");
+    }
+  });
+}
 
 tabButtons.forEach((button) => {
   button.addEventListener("click", () => {

@@ -88,6 +88,8 @@ function sendJson(response, statusCode, payload, headers = {}) {
 function sendHtml(response, statusCode, html) {
   response.writeHead(statusCode, {
     "Content-Type": "text/html; charset=utf-8",
+    "Cache-Control": "no-store, max-age=0, must-revalidate",
+    Pragma: "no-cache",
   });
   response.end(html);
 }
@@ -103,7 +105,11 @@ function sendText(response, statusCode, text, headers = {}) {
 async function serveStaticFile(response, fileName, contentType) {
   const filePath = path.join(publicDir, fileName);
   const content = await fs.readFile(filePath);
-  response.writeHead(200, { "Content-Type": contentType });
+  response.writeHead(200, {
+    "Content-Type": contentType,
+    "Cache-Control": "no-store, max-age=0, must-revalidate",
+    Pragma: "no-cache",
+  });
   response.end(content);
 }
 
