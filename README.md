@@ -8,6 +8,14 @@
 curl -fsSL https://raw.githubusercontent.com/laolaoshiren/snail-subscription-server/main/scripts/install.sh | sudo bash
 ```
 
+## Docker 一键安装
+
+如果你希望用 Docker 部署，执行这一条命令即可完成安装或更新、拉取镜像并启动容器：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/laolaoshiren/snail-subscription-server/main/scripts/docker-install.sh | sudo bash
+```
+
 脚本会交互式询问两项内容：
 
 - 面板密码
@@ -26,6 +34,12 @@ curl -fsSL https://raw.githubusercontent.com/laolaoshiren/snail-subscription-ser
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/laolaoshiren/snail-subscription-server/main/scripts/install.sh | sudo env PANEL_PASSWORD='你的密码' PORT=3000 PROXY_URL=http://127.0.0.1:7890 INVITE_CODE=你的邀请码 bash
+```
+
+Docker 模式同样支持环境变量直传：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/laolaoshiren/snail-subscription-server/main/scripts/docker-install.sh | sudo env PANEL_PASSWORD='你的密码' PORT=3000 PROXY_URL=http://127.0.0.1:7890 INVITE_CODE=你的邀请码 bash
 ```
 
 ## 项目说明
@@ -51,6 +65,25 @@ curl -fsSL https://raw.githubusercontent.com/laolaoshiren/snail-subscription-ser
 6. 首次安装时写入你设置的面板密码，或自动生成随机密码。
 
 支持的系统以常见 Linux 发行版为主，要求系统使用 `systemd`。
+
+## Docker 发布
+
+仓库已经加入 GitHub Actions 自动构建流程。每次推送到 `main` 后，GitHub 会自动构建 Docker 镜像。
+
+如果是刚推送完新版本，先等 GitHub Actions 执行成功，再使用 Docker 一键安装脚本拉取最新镜像。
+
+默认镜像地址：
+
+```text
+ghcr.io/laolaoshiren/snail-subscription-server:latest
+```
+
+相关文件：
+
+- `.github/workflows/docker.yml`
+- `Dockerfile`
+- `.dockerignore`
+- `scripts/docker-install.sh`
 
 ## 常用运维命令
 

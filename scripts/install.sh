@@ -345,39 +345,10 @@ set_panel_password() {
     return
   fi
 
-  APP_DIR_ENV="${APP_DIR}" PANEL_PASSWORD_ENV="${PANEL_PASSWORD_RESULT}" node <<'NODE'
-const crypto = require("node:crypto");
-const fs = require("node:fs");
-const path = require("node:path");
-
-const appDir = process.env.APP_DIR_ENV;
-const password = process.env.PANEL_PASSWORD_ENV;
-const dataDir = path.join(appDir, "data");
-const accountFile = path.join(dataDir, "account.json");
-
-let relayToken = crypto.randomBytes(24).toString("hex");
-try {
-  const existing = JSON.parse(fs.readFileSync(accountFile, "utf8"));
-  if (typeof existing.relayToken === "string" && existing.relayToken.trim()) {
-    relayToken = existing.relayToken.trim();
-  }
-} catch (error) {
-  if (error.code !== "ENOENT") {
-    throw error;
-  }
-}
-
-const salt = crypto.randomBytes(16).toString("hex");
-const passwordHash = crypto.scryptSync(password, salt, 64).toString("hex");
-
-fs.mkdirSync(dataDir, { recursive: true });
-fs.writeFileSync(accountFile, JSON.stringify({
-  passwordSalt: salt,
-  passwordHash,
-  relayToken,
-  updatedAt: new Date().toISOString(),
-}, null, 2));
-NODE
+  (
+    cd "${APP_DIR}"
+    PANEL_PASSWORD="${PANEL_PASSWORD_RESULT}" node scripts/init-account.js >/dev/null
+  )
 
   chown "${APP_USER}:${APP_USER}" "${APP_DIR}/data/account.json"
 }
