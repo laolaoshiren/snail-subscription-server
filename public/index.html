@@ -1,0 +1,157 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Snail 中转订阅面板</title>
+    <link rel="stylesheet" href="/styles.css" />
+    <script defer src="/app.js"></script>
+  </head>
+  <body>
+    <div class="page-shell">
+      <main class="app-shell">
+        <section id="loginView" class="auth-view">
+          <div class="auth-brand">
+            <p class="eyebrow">Relay Console</p>
+            <h1>Snail 中转订阅面板</h1>
+            <p>客户端始终使用服务器链接，服务器自动中转上游订阅内容。</p>
+          </div>
+
+          <section class="panel auth-card">
+            <div class="panel-head">
+              <h2>输入面板密码</h2>
+              <p>默认密码为 <code>admin</code></p>
+            </div>
+
+            <form id="loginForm" class="stack-form">
+              <label>
+                <span>密码</span>
+                <input id="loginPassword" name="password" type="password" value="admin" autocomplete="current-password" required />
+              </label>
+
+              <button id="loginButton" class="primary-button" type="submit">进入面板</button>
+            </form>
+          </section>
+        </section>
+
+        <section id="dashboardView" class="dashboard-view hidden">
+          <header class="dashboard-header">
+            <div>
+              <p class="eyebrow">Server Relay</p>
+              <h1>Snail 中转订阅面板</h1>
+              <p>复制服务器链接到客户端即可，客户端不会直接暴露上游订阅地址。</p>
+            </div>
+
+            <div class="header-actions">
+              <button class="tab-button active" type="button" data-tab="subscription">订阅</button>
+              <button class="tab-button" type="button" data-tab="security">安全</button>
+              <button id="logoutButton" class="ghost-button" type="button">退出</button>
+            </div>
+          </header>
+
+          <div id="statusBar" class="status-bar hidden"></div>
+
+          <section id="subscriptionTab" class="tab-panel">
+            <div class="subscription-grid">
+              <div class="subscription-sidebar">
+                <section class="panel action-panel">
+                  <div class="panel-head">
+                    <h2>生成最新订阅</h2>
+                    <p>服务端将自动执行注册脚本并刷新上游订阅信息。</p>
+                  </div>
+
+                  <form id="registerForm" class="stack-form compact-form">
+                    <label>
+                      <span>邀请码</span>
+                      <input id="inviteCode" name="inviteCode" type="text" placeholder="可选" />
+                    </label>
+
+                    <button id="registerButton" class="primary-button" type="submit">生成并刷新</button>
+                  </form>
+                </section>
+
+                <section class="panel meta-panel">
+                  <div class="panel-head">
+                    <h2>最新注册信息</h2>
+                    <p>以下是当前中转所绑定的最新上游账号。</p>
+                  </div>
+
+                  <div class="meta-grid">
+                    <div class="meta-card">
+                      <span>邮箱</span>
+                      <strong id="metaEmail">暂无</strong>
+                    </div>
+                    <div class="meta-card">
+                      <span>密码</span>
+                      <strong id="metaPassword">暂无</strong>
+                    </div>
+                    <div class="meta-card">
+                      <span>邀请码</span>
+                      <strong id="metaInviteCode">暂无</strong>
+                    </div>
+                    <div class="meta-card">
+                      <span>时间</span>
+                      <strong id="metaCreatedAt">暂无</strong>
+                    </div>
+                    <div class="meta-card wide">
+                      <span>上游官网</span>
+                      <strong id="metaUpstreamSite">暂无</strong>
+                    </div>
+                  </div>
+                </section>
+              </div>
+
+              <section class="panel links-panel">
+                <div class="panel-head">
+                  <h2>服务器中转订阅链接</h2>
+                  <p>将以下服务器链接复制到订阅客户端即可。</p>
+                </div>
+
+                <div id="linksList" class="links-grid"></div>
+                <div id="emptyState" class="empty-state">还没有生成过最新订阅，先点击左侧按钮创建一份。</div>
+              </section>
+            </div>
+          </section>
+
+          <section id="securityTab" class="tab-panel hidden">
+            <div class="security-grid">
+              <section class="panel security-panel">
+                <div class="panel-head">
+                  <h2>修改面板密码</h2>
+                  <p>面板认证已精简为仅密码模式，默认密码为 <code>admin</code>。</p>
+                </div>
+
+                <form id="passwordForm" class="stack-form">
+                  <label>
+                    <span>当前密码</span>
+                    <input id="currentPassword" name="currentPassword" type="password" autocomplete="current-password" required />
+                  </label>
+
+                  <label>
+                    <span>新密码</span>
+                    <input id="newPassword" name="newPassword" type="password" placeholder="至少 4 位" required />
+                  </label>
+
+                  <button id="savePasswordButton" class="primary-button" type="submit">保存新密码</button>
+                </form>
+              </section>
+
+              <section class="panel tips-panel">
+                <div class="panel-head">
+                  <h2>说明</h2>
+                  <p>中转订阅地址是稳定的服务器地址。生成新订阅后，服务器会自动把这些地址映射到新的上游订阅内容。</p>
+                </div>
+
+                <ul class="tips-list">
+                  <li>客户端只需要保存服务器给出的链接。</li>
+                  <li>上游真实订阅地址不会出现在客户端配置里。</li>
+                  <li>更换上游账号后，客户端仍继续访问服务器地址。</li>
+                </ul>
+              </section>
+            </div>
+          </section>
+        </section>
+      </main>
+    </div>
+  </body>
+</html>

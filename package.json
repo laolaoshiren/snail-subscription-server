@@ -1,0 +1,16 @@
+{
+  "name": "snail-subscription-server",
+  "version": "1.0.0",
+  "description": "Node project for triggering auto registration and returning latest subscription info by client type.",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js",
+    "client": "node src/client.js",
+    "register": "node auto_register.js",
+    "register:json": "node auto_register.js --json"
+  },
+  "dependencies": {
+    "undici": "^7.16.0"
+  }
+}
