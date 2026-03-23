@@ -49,10 +49,12 @@ curl -fsSL https://raw.githubusercontent.com/laolaoshiren/snail-subscription-ser
 
 当前逻辑如下：
 
-1. 面板生成固定的服务器中转链接。
-2. 客户端每次请求这个固定链接时，服务端都会重新执行注册脚本。
-3. 服务端拿到这一次最新的订阅内容后，立即中转返回给客户端。
-4. 本地只保存最近一次注册结果，方便面板查看和排错。
+1. 面板内置 `用户A` 到 `用户E` 共 5 个用户位，每个用户都有独立的服务器中转 token。
+2. 兼容模式保留旧逻辑，客户端每次拉取固定中转链接时都会重新注册上游账号。
+3. 智能模式只会在两种请求到来时访问上游：客户端拉取订阅、管理页查看当前用户状态。
+4. 智能模式下，服务端会先查询当前用户上游流量；剩余流量低于 `20%` 才重新注册，否则直接复用现有上游订阅。
+5. 管理页支持按用户查看最近流量快照、历史注册时间和中转日志。
+6. 如果你给服务器绑定了域名，可以在管理页设置里填写中转域名；填写后页面和 API 返回的订阅链接会优先按该域名显示。
 
 ## 生产部署结果
 
@@ -144,8 +146,9 @@ http://127.0.0.1:3000
 - `POST /api/logout`
 - `GET /api/session`
 - `POST /api/password`
+- `POST /api/settings`
 - `POST /api/subscriptions`
-- `GET /api/subscriptions/latest?type=full`
+- `GET /api/subscriptions/latest?type=full&user=userA`
 
 公开订阅入口：
 

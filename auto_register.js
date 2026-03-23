@@ -271,6 +271,135 @@ function buildRegistrationResult({
   };
 }
 
+function toIsoDate(value) {
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
+    return "";
+  }
+
+  return new Date(value * 1000).toISOString();
+}
+
+function normalizeTrafficValue(value) {
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
+    return 0;
+  }
+
+  return value;
+}
+
+function buildUsageSnapshot({
+  subscribeData,
+  infoData,
+  statData,
+  apiBase,
+  upstreamSite = "",
+  entryUrl = DEFAULT_UPSTREAM_ENTRY_URL,
+  detectorConfigUrl = buildUrl(DEFAULT_UPSTREAM_ENTRY_URL, "/config.json"),
+  upstreamSource = "fallback",
+}) {
+  const usedUpload = normalizeTrafficValue(subscribeData?.u);
+  const usedDownload = normalizeTrafficValue(subscribeData?.d);
+  const transferEnable = normalizeTrafficValue(
+    subscribeData?.transfer_enable ?? infoData?.transfer_enable,
+  );
+  const usedTotal = usedUpload + usedDownload;
+  const remainingTraffic = Math.max(transferEnable - usedTotal, 0);
+  const remainingPercent = transferEnable > 0 ? (remainingTraffic / transferEnable) * 100 : 0;
+  const usagePercent = transferEnable > 0 ? (usedTotal / transferEnable) * 100 : 0;
+  const subscribeUrl = typeof subscribeData?.subscribe_url === "string"
+    ? subscribeData.subscribe_url
+    : "";
+
+  return {
+    queriedAt: new Date().toISOString(),
+    email: subscribeData?.email || infoData?.email || "",
+    subscribeUrl,
+    clientUrls: subscribeUrl ? buildClientUrls(subscribeUrl) : {},
+    planId: subscribeData?.plan_id ?? infoData?.plan_id ?? null,
+    planName: subscribeData?.plan?.name || "",
+    resetDay: subscribeData?.reset_day ?? null,
+    expiredAt: toIsoDate(subscribeData?.expired_at ?? infoData?.expired_at),
+    accountCreatedAt: toIsoDate(infoData?.created_at),
+    lastLoginAt: toIsoDate(infoData?.last_login_at),
+    transferEnable,
+    usedUpload,
+    usedDownload,
+    usedTotal,
+    remainingTraffic,
+    remainingPercent: Number(remainingPercent.toFixed(2)),
+    usagePercent: Number(usagePercent.toFixed(2)),
+    stat: statData ?? null,
+    upstreamSite,
+    apiBase,
+    entryUrl,
+    detectorConfigUrl,
+    upstreamSource,
+  };
+}
+
+async function querySubscriptionStatus(options = {}) {
+  const logger = createLogger(options.verbose !== false, options.logger);
+  const authToken = (options.token || "").toString().trim();
+
+  if (!authToken) {
+    throw new Error("Missing auth token for upstream status query.");
+  }
+
+  ensureProxyConfigured();
+
+  let upstream = null;
+
+  if (options.apiBase) {
+    upstream = {
+      entryUrl: options.entryUrl || process.env.UPSTREAM_ENTRY_URL || DEFAULT_UPSTREAM_ENTRY_URL,
+      detectorConfigUrl:
+        options.detectorConfigUrl ||
+        buildUrl(options.entryUrl || process.env.UPSTREAM_ENTRY_URL || DEFAULT_UPSTREAM_ENTRY_URL, "/config.json"),
+      siteBase: options.upstreamSite || "",
+      apiBase: options.apiBase,
+      source: options.upstreamSource || "record",
+    };
+  } else {
+    upstream = await resolveUpstreamConfig({
+      entryUrl: options.entryUrl,
+      verbose: options.verbose,
+      logger: options.logger,
+    });
+  }
+
+  logger.log("[upstream] Querying current subscription status");
+
+  const headers = { Authorization: authToken };
+  const [subscribeResult, infoResult, statResult] = await Promise.all([
+    apiRequest(upstream.apiBase, "/user/getSubscribe", { headers }),
+    apiRequest(upstream.apiBase, "/user/info", { headers }),
+    apiRequest(upstream.apiBase, "/user/getStat", { headers }),
+  ]);
+
+  if (subscribeResult.status !== "success") {
+    throw new Error(subscribeResult.message || JSON.stringify(subscribeResult));
+  }
+
+  if (infoResult.status !== "success") {
+    throw new Error(infoResult.message || JSON.stringify(infoResult));
+  }
+
+  if (statResult.status !== "success") {
+    throw new Error(statResult.message || JSON.stringify(statResult));
+  }
+
+  return buildUsageSnapshot({
+    subscribeData: subscribeResult.data || {},
+    infoData: infoResult.data || {},
+    statData: statResult.data,
+    apiBase: upstream.apiBase,
+    upstreamSite: upstream.siteBase,
+    entryUrl: upstream.entryUrl,
+    detectorConfigUrl: upstream.detectorConfigUrl,
+    upstreamSource: upstream.source,
+  });
+}
+
 function buildMockResult(inviteCode = "") {
   const email = generateRandomEmail();
   const password = generateRandomPassword();
@@ -449,7 +578,9 @@ if (require.main === module) {
 module.exports = {
   URL_TYPES,
   buildClientUrls,
+  buildUsageSnapshot,
   ensureProxyConfigured,
+  querySubscriptionStatus,
   registerAndFetchSubscribe,
   resolveUpstreamConfig,
 };

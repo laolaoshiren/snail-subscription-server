@@ -5,24 +5,34 @@ const dashboardView = document.querySelector("#dashboardView");
 const loginForm = document.querySelector("#loginForm");
 const registerForm = document.querySelector("#registerForm");
 const passwordForm = document.querySelector("#passwordForm");
+const settingsForm = document.querySelector("#settingsForm");
 const logoutButton = document.querySelector("#logoutButton");
 const statusBar = document.querySelector("#statusBar");
 const linksList = document.querySelector("#linksList");
 const emptyState = document.querySelector("#emptyState");
 const tabButtons = Array.from(document.querySelectorAll("[data-tab]"));
 const subscriptionTab = document.querySelector("#subscriptionTab");
-const securityTab = document.querySelector("#securityTab");
+const logsTab = document.querySelector("#logsTab");
+const settingsTab = document.querySelector("#settingsTab");
+const userSwitcher = document.querySelector("#userSwitcher");
+const usageGrid = document.querySelector("#usageGrid");
+const usageEmptyState = document.querySelector("#usageEmptyState");
+const historyList = document.querySelector("#historyList");
+const historyEmptyState = document.querySelector("#historyEmptyState");
 
 const metaEmail = document.querySelector("#metaEmail");
 const metaPassword = document.querySelector("#metaPassword");
 const metaInviteCode = document.querySelector("#metaInviteCode");
 const metaCreatedAt = document.querySelector("#metaCreatedAt");
 const metaUpstreamSite = document.querySelector("#metaUpstreamSite");
+const activeUserLabel = document.querySelector("#activeUserLabel");
+const modeDescription = document.querySelector("#modeDescription");
+const displayOriginInput = document.querySelector("#displayOrigin");
 
 const loginButton = document.querySelector("#loginButton");
 const registerButton = document.querySelector("#registerButton");
 const savePasswordButton = document.querySelector("#savePasswordButton");
-let currentRelayUrls = null;
+const saveSettingsButton = document.querySelector("#saveSettingsButton");
 
 const protocolLabels = {
   universal: "通用订阅",
@@ -31,6 +41,17 @@ const protocolLabels = {
   surge: "Surge",
   quantumultx: "Quantumult X",
   "sing-box": "sing-box",
+};
+
+const state = {
+  runtimeMode: "always_refresh",
+  trafficThresholdPercent: 20,
+  displayOrigin: "",
+  users: [],
+  relayUrlsByUser: {},
+  userSummaries: [],
+  currentUserKey: "userA",
+  currentPayload: null,
 };
 
 async function copyText(value) {
@@ -100,9 +121,9 @@ async function requestJson(url, options = {}) {
 }
 
 function activateTab(tabName) {
-  const isSubscription = tabName === "subscription";
-  subscriptionTab.classList.toggle("hidden", !isSubscription);
-  securityTab.classList.toggle("hidden", isSubscription);
+  subscriptionTab.classList.toggle("hidden", tabName !== "subscription");
+  logsTab.classList.toggle("hidden", tabName !== "logs");
+  settingsTab.classList.toggle("hidden", tabName !== "settings");
 
   tabButtons.forEach((button) => {
     button.classList.toggle("active", button.dataset.tab === tabName);
@@ -120,14 +141,78 @@ function showDashboard() {
   activateTab("subscription");
 }
 
+function findCurrentUser() {
+  return state.users.find((user) => user.key === state.currentUserKey) || state.users[0] || {
+    key: state.currentUserKey,
+    label: "用户",
+  };
+}
+
+function getCurrentSummary() {
+  return state.userSummaries.find((item) => item.key === state.currentUserKey) || null;
+}
+
+function formatDateTime(value) {
+  if (!value) {
+    return "暂无";
+  }
+
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return value;
+  }
+
+  return date.toLocaleString();
+}
+
+function formatBytes(value) {
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
+    return "暂无";
+  }
+
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let current = value;
+  let unitIndex = 0;
+
+  while (current >= 1024 && unitIndex < units.length - 1) {
+    current /= 1024;
+    unitIndex += 1;
+  }
+
+  return `${current.toFixed(current >= 100 || unitIndex === 0 ? 0 : 2)} ${units[unitIndex]}`;
+}
+
+function formatPercent(value) {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return "暂无";
+  }
+
+  return `${value.toFixed(2)}%`;
+}
+
+function describeMode(runtimeMode) {
+  if (runtimeMode === "smart_usage") {
+    return `当前是智能模式：只有客户端拉取和管理查看才会查上游，剩余流量低于 ${state.trafficThresholdPercent}% 时才重新注册。`;
+  }
+
+  return "当前是兼容模式：客户端每次拉取订阅都会直接重新注册上游账号。";
+}
+
+function selectRuntimeMode(runtimeMode) {
+  const radio = settingsForm.querySelector(`input[name="runtimeMode"][value="${runtimeMode}"]`);
+  if (radio) {
+    radio.checked = true;
+  }
+}
+
 function fillMeta(registration) {
   metaEmail.textContent = registration?.email || "暂无";
   metaPassword.textContent = registration?.password || "暂无";
   metaInviteCode.textContent = registration?.inviteCode || "无";
   metaCreatedAt.textContent = registration?.createdAt
-    ? new Date(registration.createdAt).toLocaleString()
+    ? formatDateTime(registration.createdAt)
     : "暂无";
-  metaUpstreamSite.textContent = registration?.upstreamSite || "暂无";
+  metaUpstreamSite.textContent = registration?.upstreamSite || registration?.entryUrl || "暂无";
 }
 
 function renderLinks(relayUrls) {
@@ -140,7 +225,7 @@ function renderLinks(relayUrls) {
 
   emptyState.classList.add("hidden");
 
-  for (const [type, label] of Object.entries(protocolLabels)) {
+  Object.entries(protocolLabels).forEach(([type, label]) => {
     const url = relayUrls[type];
     const item = document.createElement("article");
     item.className = "link-card";
@@ -170,29 +255,233 @@ function renderLinks(relayUrls) {
 
     item.append(head, input, button);
     linksList.appendChild(item);
-  }
+  });
 }
 
-function applyLatestState(registration, relayUrls) {
-  if (relayUrls) {
-    currentRelayUrls = relayUrls;
+function renderUsage(usage) {
+  usageGrid.innerHTML = "";
+
+  if (!usage) {
+    usageEmptyState.classList.remove("hidden");
+    return;
   }
 
-  fillMeta(registration);
-  renderLinks(currentRelayUrls);
+  usageEmptyState.classList.add("hidden");
+
+  const cards = [
+    ["最近查询", formatDateTime(usage.queriedAt)],
+    ["套餐", usage.planName || "暂无"],
+    ["总流量", formatBytes(usage.transferEnable)],
+    ["已用流量", formatBytes(usage.usedTotal)],
+    ["剩余流量", formatBytes(usage.remainingTraffic)],
+    ["剩余比例", formatPercent(usage.remainingPercent)],
+    ["到期时间", formatDateTime(usage.expiredAt)],
+    ["最近登录", formatDateTime(usage.lastLoginAt)],
+  ];
+
+  cards.forEach(([label, value]) => {
+    const card = document.createElement("article");
+    card.className = "usage-card";
+    card.innerHTML = `<span>${label}</span><strong>${value}</strong>`;
+    usageGrid.appendChild(card);
+  });
 }
 
-async function loadLatestRegistration() {
+function buildHistoryMeta(entry) {
+  const parts = [];
+
+  if (entry.mode === "smart_usage") {
+    parts.push("智能模式");
+  } else if (entry.mode === "always_refresh") {
+    parts.push("兼容模式");
+  }
+
+  if (entry.requestSource === "relay") {
+    parts.push("客户端拉取");
+  } else if (entry.requestSource === "view") {
+    parts.push("管理查看");
+  } else if (entry.requestSource === "manual") {
+    parts.push("手动操作");
+  }
+
+  if (entry.relayType) {
+    parts.push(entry.relayType);
+  }
+
+  if (entry.decision === "register") {
+    parts.push("已换号");
+  } else if (entry.decision === "reuse") {
+    parts.push("继续复用");
+  } else if (entry.decision === "low-traffic") {
+    parts.push("低流量预警");
+  }
+
+  if (typeof entry.usage?.remainingPercent === "number") {
+    parts.push(`剩余 ${entry.usage.remainingPercent.toFixed(2)}%`);
+  }
+
+  return parts.join(" · ");
+}
+
+function renderHistory(history) {
+  historyList.innerHTML = "";
+
+  if (!Array.isArray(history) || history.length === 0) {
+    historyEmptyState.classList.remove("hidden");
+    return;
+  }
+
+  historyEmptyState.classList.add("hidden");
+
+  history.forEach((entry) => {
+    const item = document.createElement("article");
+    item.className = "history-item";
+
+    const metaText = buildHistoryMeta(entry);
+    const registrationTime = entry.registration?.createdAt
+      ? `上游注册时间：${formatDateTime(entry.registration.createdAt)}`
+      : "";
+    const usageText =
+      typeof entry.usage?.usedTotal === "number" && typeof entry.usage?.transferEnable === "number"
+        ? `已用 ${formatBytes(entry.usage.usedTotal)} / 总量 ${formatBytes(entry.usage.transferEnable)}`
+        : "";
+
+    item.innerHTML = `
+      <div class="history-head">
+        <strong>${entry.title || "状态更新"}</strong>
+        <span>${formatDateTime(entry.timestamp)}</span>
+      </div>
+      <p>${entry.message || "暂无说明"}</p>
+      <div class="history-meta">${[metaText, registrationTime, usageText].filter(Boolean).join(" · ") || "暂无更多信息"}</div>
+    `;
+    historyList.appendChild(item);
+  });
+}
+
+function updateSummaryFromPayload(payload) {
+  const currentUser = findCurrentUser();
+  const nextSummary = {
+    key: currentUser.key,
+    label: currentUser.label,
+    hasRegistration: Boolean(payload.registration),
+    createdAt: payload.registration?.createdAt || "",
+    updatedAt: payload.usage?.queriedAt || payload.registration?.createdAt || "",
+    remainingPercent:
+      typeof payload.usage?.remainingPercent === "number" ? payload.usage.remainingPercent : null,
+    remainingTraffic:
+      typeof payload.usage?.remainingTraffic === "number" ? payload.usage.remainingTraffic : null,
+    transferEnable:
+      typeof payload.usage?.transferEnable === "number" ? payload.usage.transferEnable : null,
+    queriedAt: payload.usage?.queriedAt || "",
+    lastAction: Array.isArray(payload.history) && payload.history[0] ? payload.history[0].title : "",
+  };
+
+  state.userSummaries = state.users.map((user) => {
+    if (user.key === currentUser.key) {
+      return nextSummary;
+    }
+
+    return state.userSummaries.find((item) => item.key === user.key) || {
+      key: user.key,
+      label: user.label,
+      hasRegistration: false,
+      createdAt: "",
+      updatedAt: "",
+      remainingPercent: null,
+      remainingTraffic: null,
+      transferEnable: null,
+      queriedAt: "",
+      lastAction: "",
+    };
+  });
+}
+
+function renderUserSwitcher() {
+  userSwitcher.innerHTML = "";
+
+  state.users.forEach((user) => {
+    const summary = state.userSummaries.find((item) => item.key === user.key);
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = `user-chip${user.key === state.currentUserKey ? " active" : ""}`;
+
+    let note = "未初始化";
+    if (summary?.hasRegistration && typeof summary.remainingPercent === "number") {
+      note = `剩余 ${summary.remainingPercent.toFixed(2)}%`;
+    } else if (summary?.hasRegistration) {
+      note = "已注册";
+    }
+
+    button.innerHTML = `<strong>${user.label}</strong><small>${note}</small>`;
+    button.addEventListener("click", async () => {
+      if (user.key === state.currentUserKey) {
+        return;
+      }
+
+      state.currentUserKey = user.key;
+      renderUserSwitcher();
+      await loadUserState();
+    });
+    userSwitcher.appendChild(button);
+  });
+}
+
+function applySession(payload) {
+  state.runtimeMode = payload.runtimeMode || state.runtimeMode;
+  state.trafficThresholdPercent = payload.trafficThresholdPercent || state.trafficThresholdPercent;
+  state.displayOrigin = payload.displayOrigin || "";
+  state.users = Array.isArray(payload.users) ? payload.users : [];
+  state.relayUrlsByUser = payload.relayUrlsByUser || {};
+  state.userSummaries = Array.isArray(payload.userSummaries) ? payload.userSummaries : [];
+
+  const hasCurrent = state.users.some((user) => user.key === state.currentUserKey);
+  if (!hasCurrent) {
+    state.currentUserKey = payload.defaultUserKey || state.users[0]?.key || "userA";
+  }
+
+  activeUserLabel.textContent = findCurrentUser().label;
+  modeDescription.textContent = describeMode(state.runtimeMode);
+  selectRuntimeMode(state.runtimeMode);
+  displayOriginInput.value = state.displayOrigin;
+  renderUserSwitcher();
+}
+
+function applyUserPayload(payload) {
+  state.currentPayload = payload;
+  state.runtimeMode = payload.runtimeMode || state.runtimeMode;
+  state.trafficThresholdPercent = payload.trafficThresholdPercent || state.trafficThresholdPercent;
+  displayOriginInput.value = state.displayOrigin;
+  state.relayUrlsByUser[state.currentUserKey] = payload.relayUrls || state.relayUrlsByUser[state.currentUserKey];
+
+  activeUserLabel.textContent = payload.user?.label || findCurrentUser().label;
+  modeDescription.textContent = describeMode(state.runtimeMode);
+  selectRuntimeMode(state.runtimeMode);
+
+  fillMeta(payload.registration);
+  renderLinks(payload.relayUrls || state.relayUrlsByUser[state.currentUserKey] || null);
+  renderUsage(payload.usage);
+  renderHistory(payload.history);
+  updateSummaryFromPayload(payload);
+  renderUserSwitcher();
+}
+
+async function loadUserState() {
+  const user = findCurrentUser();
+  activeUserLabel.textContent = user.label;
+
   try {
-    const payload = await requestJson("/api/subscriptions/latest?type=full");
-    applyLatestState(payload.registration, payload.relayUrls);
-  } catch (error) {
-    if (error.status === 404) {
-      applyLatestState(null, currentRelayUrls);
-      clearStatus();
+    const payload = await requestJson(
+      `/api/subscriptions/latest?type=full&user=${encodeURIComponent(state.currentUserKey)}`,
+    );
+    applyUserPayload(payload);
+
+    if (payload.warning) {
+      setStatus(payload.warning, "warning");
       return;
     }
 
+    clearStatus();
+  } catch (error) {
     if (error.status === 401) {
       showLogin();
       setStatus("登录状态已失效，请重新输入密码。", "error");
@@ -214,8 +503,8 @@ async function refreshSession() {
     }
 
     showDashboard();
-    applyLatestState(null, payload.relayUrls);
-    await loadLatestRegistration();
+    applySession(payload);
+    await loadUserState();
   } catch (error) {
     setStatus(error.message, "error");
   }
@@ -235,9 +524,8 @@ loginForm.addEventListener("submit", async (event) => {
       body: JSON.stringify({ password }),
     });
 
-    showDashboard();
     setStatus("登录成功。", "success");
-    await loadLatestRegistration();
+    await refreshSession();
   } catch (error) {
     setStatus(error.message, "error");
   } finally {
@@ -248,7 +536,7 @@ loginForm.addEventListener("submit", async (event) => {
 registerForm.addEventListener("submit", async (event) => {
   event.preventDefault();
   clearStatus();
-  setLoading(registerButton, "生成中...", true);
+  setLoading(registerButton, "处理中...", true);
 
   const formData = new FormData(registerForm);
   const inviteCode = (formData.get("inviteCode") || "").toString().trim();
@@ -256,11 +544,15 @@ registerForm.addEventListener("submit", async (event) => {
   try {
     const payload = await requestJson("/api/subscriptions", {
       method: "POST",
-      body: JSON.stringify({ type: "full", inviteCode }),
+      body: JSON.stringify({
+        type: "full",
+        inviteCode,
+        userKey: state.currentUserKey,
+      }),
     });
 
-    applyLatestState(payload.registration, payload.relayUrls);
-    setStatus("已刷新服务器中转订阅。", "success");
+    applyUserPayload(payload);
+    setStatus(`${findCurrentUser().label} 已重新注册新的上游账号。`, "success");
   } catch (error) {
     if (error.status === 401) {
       showLogin();
@@ -270,7 +562,43 @@ registerForm.addEventListener("submit", async (event) => {
 
     setStatus(error.message, "error");
   } finally {
-    setLoading(registerButton, "生成中...", false);
+    setLoading(registerButton, "处理中...", false);
+  }
+});
+
+settingsForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  clearStatus();
+  setLoading(saveSettingsButton, "保存中...", true);
+
+  const formData = new FormData(settingsForm);
+  const runtimeMode = (formData.get("runtimeMode") || "").toString();
+  const displayOrigin = (formData.get("displayOrigin") || "").toString().trim();
+
+  try {
+    const payload = await requestJson("/api/settings", {
+      method: "POST",
+      body: JSON.stringify({ runtimeMode, displayOrigin }),
+    });
+
+    state.runtimeMode = payload.runtimeMode;
+    state.displayOrigin = payload.displayOrigin || "";
+    state.trafficThresholdPercent = payload.trafficThresholdPercent || state.trafficThresholdPercent;
+    modeDescription.textContent = describeMode(state.runtimeMode);
+    selectRuntimeMode(state.runtimeMode);
+    displayOriginInput.value = state.displayOrigin;
+    await refreshSession();
+    setStatus("运行模式已更新。", "success");
+  } catch (error) {
+    if (error.status === 401) {
+      showLogin();
+      setStatus("登录状态已失效，请重新输入密码。", "error");
+      return;
+    }
+
+    setStatus(error.message, "error");
+  } finally {
+    setLoading(saveSettingsButton, "保存中...", false);
   }
 });
 
@@ -313,7 +641,10 @@ logoutButton.addEventListener("click", async () => {
   try {
     await requestJson("/api/logout", { method: "POST" });
     showLogin();
-    applyLatestState(null, null);
+    fillMeta(null);
+    renderLinks(null);
+    renderUsage(null);
+    renderHistory([]);
     setStatus("已退出登录。", "success");
   } catch (error) {
     setStatus(error.message, "error");

@@ -14,7 +14,7 @@
           <div class="auth-brand">
             <p class="eyebrow">Relay Console</p>
             <h1>Snail 中转订阅面板</h1>
-            <p>客户端始终使用服务器链接，服务器自动中转上游订阅内容。</p>
+            <p>客户端始终使用服务器链接，服务器根据当前模式自动中转上游订阅内容。</p>
           </div>
 
           <section class="panel auth-card">
@@ -39,12 +39,13 @@
             <div>
               <p class="eyebrow">Server Relay</p>
               <h1>Snail 中转订阅面板</h1>
-              <p>复制服务器链接到客户端即可，客户端不会直接暴露上游订阅地址。</p>
+              <p>固定中转链接按用户区分，服务器可在兼容模式与智能模式之间随时切换。</p>
             </div>
 
             <div class="header-actions">
               <button class="tab-button active" type="button" data-tab="subscription">订阅</button>
-              <button class="tab-button" type="button" data-tab="security">安全</button>
+              <button class="tab-button" type="button" data-tab="logs">日志</button>
+              <button class="tab-button" type="button" data-tab="settings">设置</button>
               <button id="logoutButton" class="ghost-button" type="button">退出</button>
             </div>
           </header>
@@ -52,12 +53,26 @@
           <div id="statusBar" class="status-bar hidden"></div>
 
           <section id="subscriptionTab" class="tab-panel">
+            <div class="panel user-panel">
+              <div class="panel-head">
+                <h2>选择用户</h2>
+                <p>每个用户对应独立的中转 token、上游账号、流量查询和历史日志。</p>
+              </div>
+
+              <div id="userSwitcher" class="user-switcher"></div>
+            </div>
+
             <div class="subscription-grid">
               <div class="subscription-sidebar">
                 <section class="panel action-panel">
                   <div class="panel-head">
-                    <h2>生成最新订阅</h2>
-                    <p>服务端将自动执行注册脚本并刷新上游订阅信息。</p>
+                    <h2>手动重新注册</h2>
+                    <p id="modeDescription">当前模式暂无。</p>
+                  </div>
+
+                  <div class="active-user-row">
+                    <span>当前用户</span>
+                    <strong id="activeUserLabel">用户A</strong>
                   </div>
 
                   <form id="registerForm" class="stack-form compact-form">
@@ -66,14 +81,14 @@
                       <input id="inviteCode" name="inviteCode" type="text" placeholder="可选" />
                     </label>
 
-                    <button id="registerButton" class="primary-button" type="submit">生成并刷新</button>
+                    <button id="registerButton" class="primary-button" type="submit">立即重新注册</button>
                   </form>
                 </section>
 
                 <section class="panel meta-panel">
                   <div class="panel-head">
-                    <h2>最新注册信息</h2>
-                    <p>以下是当前中转所绑定的最新上游账号。</p>
+                    <h2>当前用户上游信息</h2>
+                    <p>以下内容来自当前用户最近一次注册记录。</p>
                   </div>
 
                   <div class="meta-grid">
@@ -90,11 +105,11 @@
                       <strong id="metaInviteCode">暂无</strong>
                     </div>
                     <div class="meta-card">
-                      <span>时间</span>
+                      <span>注册时间</span>
                       <strong id="metaCreatedAt">暂无</strong>
                     </div>
                     <div class="meta-card wide">
-                      <span>上游官网</span>
+                      <span>上游入口</span>
                       <strong id="metaUpstreamSite">暂无</strong>
                     </div>
                   </div>
@@ -104,21 +119,79 @@
               <section class="panel links-panel">
                 <div class="panel-head">
                   <h2>服务器中转订阅链接</h2>
-                  <p>将以下服务器链接复制到订阅客户端即可。</p>
+                  <p>复制当前用户的固定服务器链接到客户端即可。</p>
                 </div>
 
                 <div id="linksList" class="links-grid"></div>
-                <div id="emptyState" class="empty-state">还没有生成过最新订阅，先点击左侧按钮创建一份。</div>
+                <div id="emptyState" class="empty-state">当前用户还没有可用订阅链接，先手动注册一次或等待客户端首次拉取。</div>
               </section>
             </div>
           </section>
 
-          <section id="securityTab" class="tab-panel hidden">
-            <div class="security-grid">
+          <section id="logsTab" class="tab-panel hidden">
+            <div class="logs-grid">
+              <section class="panel usage-panel">
+                <div class="panel-head">
+                  <h2>流量与查询状态</h2>
+                  <p>这里只显示当前用户最近一次管理查看或客户端拉取时记录的流量快照。</p>
+                </div>
+
+                <div id="usageGrid" class="usage-grid"></div>
+                <div id="usageEmptyState" class="empty-state">当前用户还没有上游流量查询记录。</div>
+              </section>
+
+              <section class="panel history-panel">
+                <div class="panel-head">
+                  <h2>历史日志</h2>
+                  <p>按时间倒序展示当前用户的注册、查询和中转记录。</p>
+                </div>
+
+                <div id="historyList" class="history-list"></div>
+                <div id="historyEmptyState" class="empty-state">当前用户还没有历史记录。</div>
+              </section>
+            </div>
+          </section>
+
+          <section id="settingsTab" class="tab-panel hidden">
+            <div class="settings-grid">
+              <section class="panel settings-panel">
+                <div class="panel-head">
+                  <h2>运行模式</h2>
+                  <p>兼容模式保留旧逻辑。智能模式会在客户端拉取或管理查看时查询上游，并根据剩余流量决定是否换号。</p>
+                </div>
+
+                <form id="settingsForm" class="stack-form">
+                  <label>
+                    <span>中转域名</span>
+                    <input id="displayOrigin" name="displayOrigin" type="text" placeholder="例如 https://sub.example.com" />
+                  </label>
+
+                  <p class="form-hint">留空则继续按当前自动识别的地址显示；如果填写，请尽量带上完整协议头，例如 <code>https://</code>。</p>
+
+                  <label class="option-card">
+                    <input type="radio" name="runtimeMode" value="always_refresh" />
+                    <span>
+                      <strong>兼容模式</strong>
+                      <small>客户端每次拉取订阅都重新注册上游账号，不做流量查询。</small>
+                    </span>
+                  </label>
+
+                  <label class="option-card">
+                    <input type="radio" name="runtimeMode" value="smart_usage" />
+                    <span>
+                      <strong>智能模式</strong>
+                      <small>仅在客户端拉取和管理查看时查询上游；剩余流量低于 20% 时才重新注册。</small>
+                    </span>
+                  </label>
+
+                  <button id="saveSettingsButton" class="primary-button" type="submit">保存设置</button>
+                </form>
+              </section>
+
               <section class="panel security-panel">
                 <div class="panel-head">
                   <h2>修改面板密码</h2>
-                  <p>面板认证已精简为仅密码模式，默认密码为 <code>admin</code>。</p>
+                  <p>面板认证仅需密码，默认密码为 <code>admin</code>。</p>
                 </div>
 
                 <form id="passwordForm" class="stack-form">
@@ -139,13 +212,13 @@
               <section class="panel tips-panel">
                 <div class="panel-head">
                   <h2>说明</h2>
-                  <p>中转订阅地址是稳定的服务器地址。生成新订阅后，服务器会自动把这些地址映射到新的上游订阅内容。</p>
+                  <p>当前面板支持 5 个用户位，每个用户都维护独立的中转 token 和上游历史。</p>
                 </div>
 
                 <ul class="tips-list">
-                  <li>客户端只需要保存服务器给出的链接。</li>
-                  <li>上游真实订阅地址不会出现在客户端配置里。</li>
-                  <li>更换上游账号后，客户端仍继续访问服务器地址。</li>
+                  <li>客户端固定保存服务器链接，不直接接触上游真实订阅地址。</li>
+                  <li>智能模式不会后台定时查询，只有客户端拉取和你主动查看时才会查上游。</li>
+                  <li>日志页可以查看流量快照、历史注册时间和每次中转行为。</li>
                 </ul>
               </section>
             </div>
