@@ -2,16 +2,30 @@
 
 ## 一键安装
 
-生产服务器执行这一条命令即可完成安装、写入 `systemd` 服务、设置开机自启并立即启动：
+生产服务器执行这一条命令即可完成安装或更新、写入 `systemd` 服务、设置开机自启并立即启动：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/laolaoshiren/snail-subscription-server/main/scripts/install.sh | sudo env PORT=3000 PROXY_URL=off bash
+curl -fsSL https://raw.githubusercontent.com/laolaoshiren/snail-subscription-server/main/scripts/install.sh | sudo bash
 ```
 
-如果你的服务器需要本地代理再访问外网，可以把代理地址一起带上：
+脚本会交互式询问两项内容：
+
+- 面板密码
+- 监听端口
+
+规则如下：
+
+1. 新安装时，密码直接回车会自动生成随机密码。
+2. 新安装时，端口直接回车会自动生成随机端口。
+3. 更新已安装项目时，密码直接回车会保留当前密码。
+4. 更新已安装项目时，端口直接回车会保留当前端口。
+
+脚本会自动判断当前服务器是首次安装还是已有项目更新。
+
+如果你不想交互，也可以通过环境变量直接传值：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/laolaoshiren/snail-subscription-server/main/scripts/install.sh | sudo env PORT=3000 PROXY_URL=http://127.0.0.1:7890 INVITE_CODE=你的邀请码 bash
+curl -fsSL https://raw.githubusercontent.com/laolaoshiren/snail-subscription-server/main/scripts/install.sh | sudo env PANEL_PASSWORD='你的密码' PORT=3000 PROXY_URL=http://127.0.0.1:7890 INVITE_CODE=你的邀请码 bash
 ```
 
 ## 项目说明
@@ -34,6 +48,7 @@ curl -fsSL https://raw.githubusercontent.com/laolaoshiren/snail-subscription-ser
 3. 生成环境文件 `/etc/snail-subscription-server.env`。
 4. 创建 `systemd` 服务 `snail-subscription-server`。
 5. 执行开机自启并立即启动服务。
+6. 首次安装时写入你设置的面板密码，或自动生成随机密码。
 
 支持的系统以常见 Linux 发行版为主，要求系统使用 `systemd`。
 
@@ -82,11 +97,9 @@ http://127.0.0.1:3000
 
 程序监听在 `0.0.0.0`，同一局域网内的其他设备可以通过服务器实际 IP 访问。
 
-默认面板密码：
+如果你是用一键安装脚本部署，面板密码以安装脚本最后输出的结果为准。
 
-- `admin`
-
-登录后可在面板内自行修改密码。
+如果你是本地手动直接运行项目，默认面板密码仍然是 `admin`。
 
 ## API
 
