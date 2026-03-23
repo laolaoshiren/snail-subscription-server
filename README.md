@@ -1,63 +1,96 @@
-# Snail Subscription Server
+# 蜗牛助手订阅中转服务
 
-This project provides a dark-mode web control panel for a server-side subscription relay flow.
+## 一键安装
 
-The logic is:
-
-1. You log in to the panel with a password
-2. The server runs `auto_register.js`
-3. The server stores the latest upstream registration result locally
-4. The panel shows server-hosted relay subscription links
-5. The client always uses the server URL, not the upstream URL
-6. When the client requests a relay link, the server fetches and returns the current upstream subscription content
-
-## Install
+生产服务器执行这一条命令即可完成安装、写入 `systemd` 服务、设置开机自启并立即启动：
 
 ```bash
-npm install
+curl -fsSL https://raw.githubusercontent.com/laolaoshiren/snail-subscription-server/main/scripts/install.sh | sudo env PORT=3000 PROXY_URL=off bash
 ```
 
-## Start
+如果你的服务器需要本地代理再访问外网，可以把代理地址一起带上：
 
 ```bash
-npm start
+curl -fsSL https://raw.githubusercontent.com/laolaoshiren/snail-subscription-server/main/scripts/install.sh | sudo env PORT=3000 PROXY_URL=http://127.0.0.1:7890 INVITE_CODE=你的邀请码 bash
 ```
 
-Default address:
+## 项目说明
+
+这是一个服务器端订阅中转面板。面板展示的是固定的服务器订阅链接，客户端始终使用服务器地址，不直接接触外部订阅地址。
+
+当前逻辑如下：
+
+1. 面板生成固定的服务器中转链接。
+2. 客户端每次请求这个固定链接时，服务端都会重新执行注册脚本。
+3. 服务端拿到这一次最新的订阅内容后，立即中转返回给客户端。
+4. 本地只保存最近一次注册结果，方便面板查看和排错。
+
+## 生产部署结果
+
+一键安装脚本默认会完成这些动作：
+
+1. 安装 `curl`、`git`、`Node.js 20`。
+2. 把项目部署到 `/opt/snail-subscription-server`。
+3. 生成环境文件 `/etc/snail-subscription-server.env`。
+4. 创建 `systemd` 服务 `snail-subscription-server`。
+5. 执行开机自启并立即启动服务。
+
+支持的系统以常见 Linux 发行版为主，要求系统使用 `systemd`。
+
+## 常用运维命令
+
+查看服务状态：
+
+```bash
+sudo systemctl status snail-subscription-server
+```
+
+查看实时日志：
+
+```bash
+sudo journalctl -u snail-subscription-server -f
+```
+
+重启服务：
+
+```bash
+sudo systemctl restart snail-subscription-server
+```
+
+## 可选环境变量
+
+安装命令里可以按需覆盖这些变量：
+
+- `PORT`
+- `PROXY_URL`
+- `INVITE_CODE`
+- `ALLOW_INSECURE_TLS`
+- `RELAY_FETCH_TIMEOUT_MS`
+- `MAX_RETRIES`
+- `RETRY_DELAY_MS`
+- `FETCH_TIMEOUT_MS`
+
+默认情况下安装脚本会把 `PROXY_URL` 设为 `off`。如果你的服务器访问外网必须经过代理，请显式传入代理地址。
+
+## 访问面板
+
+默认地址：
 
 ```text
 http://127.0.0.1:3000
 ```
 
-The server listens on `0.0.0.0`, so devices on the same network can access it by using the host machine IP.
+程序监听在 `0.0.0.0`，同一局域网内的其他设备可以通过服务器实际 IP 访问。
 
-## Login
-
-Open:
-
-```text
-http://127.0.0.1:3000
-```
-
-Default panel password:
+默认面板密码：
 
 - `admin`
 
-The dashboard supports changing the password online.
+登录后可在面板内自行修改密码。
 
-## Upstream detection
+## API
 
-The registration script now starts from the detector entry and resolves the current official site config dynamically:
-
-- Detector entry: [http://xn--9kq658f7go.com/](http://xn--9kq658f7go.com/)
-- Detector config: [https://xn--9kq658f7go.com/config.json](https://xn--9kq658f7go.com/config.json)
-- Official config example: [https://snaillink.com/config.json](https://snaillink.com/config.json)
-
-The script reads the live `api_base` from the official site config instead of only relying on a hard-coded API URL.
-
-## Protected API
-
-Authenticated endpoints:
+需要登录的接口：
 
 - `POST /api/login`
 - `POST /api/logout`
@@ -66,11 +99,11 @@ Authenticated endpoints:
 - `POST /api/subscriptions`
 - `GET /api/subscriptions/latest?type=full`
 
-Public relay endpoint:
+公开订阅入口：
 
 - `GET /subscribe/:type?token=...`
 
-Supported subscription `type` values:
+支持的订阅类型：
 
 - `full`
 - `universal`
@@ -80,28 +113,48 @@ Supported subscription `type` values:
 - `quantumultx`
 - `sing-box`
 
-## CLI client
+## 本地开发
 
-The example client logs in with the panel password and then calls the protected API.
+安装依赖：
+
+```bash
+npm install
+```
+
+启动项目：
+
+```bash
+npm start
+```
+
+开发模式：
+
+```bash
+npm run dev
+```
+
+## CLI 示例
+
+读取当前最新记录：
 
 ```bash
 $env:PANEL_PASSWORD="admin"
 node src/client.js latest full
 ```
 
-Create a new upstream registration and get the current server relay URLs:
+手动触发一次注册并返回当前中转链接：
 
 ```bash
 node src/client.js create full TESTCODE http://127.0.0.1:3000
 ```
 
-## Mock mode
+## Mock 模式
 
-To test the whole flow without creating a real upstream account:
+如果只想测试整条中转链路，而不访问真实外部资源，可以使用 Mock 模式：
 
 ```bash
 $env:AUTO_REGISTER_MOCK="1"
 npm start
 ```
 
-In mock mode the panel still generates working server relay URLs, but the upstream data is fake and local-only.
+Mock 模式下，中转链接仍然可访问，但返回的是本地生成的模拟内容。
