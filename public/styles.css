@@ -362,10 +362,7 @@ small {
 }
 
 .workspace-upstreams {
-  grid-template-columns: 1fr;
-  grid-auto-rows: max-content;
-  align-content: start;
-  overflow: auto;
+  grid-template-columns: 300px minmax(0, 1fr);
 }
 
 .workspace-system {
@@ -376,6 +373,7 @@ small {
 .links-panel,
 .usage-panel,
 .history-panel,
+.upstream-list-panel,
 .upstream-overview-panel,
 .upstream-form-panel,
 .system-panel,
@@ -383,15 +381,6 @@ small {
   height: 100%;
   min-height: 0;
   overflow: auto;
-  padding: 16px;
-}
-
-.upstream-toolbar-panel,
-.upstream-cloud-panel,
-.workspace-upstreams .upstream-form-panel {
-  height: auto;
-  min-height: 0;
-  overflow: visible;
   padding: 16px;
 }
 
@@ -659,7 +648,6 @@ textarea {
 
 .upstream-list {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
   gap: 10px;
   margin-top: 14px;
   align-content: start;
@@ -672,7 +660,10 @@ textarea {
   border-radius: 16px;
   background: var(--panel-soft);
   color: var(--text);
-  display: block;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: center;
   text-align: left;
   cursor: pointer;
   transition: transform 140ms ease, border-color 140ms ease, opacity 140ms ease;
@@ -691,6 +682,20 @@ textarea {
   opacity: 0.72;
 }
 
+.upstream-list-item.dragging {
+  opacity: 0.45;
+}
+
+.upstream-list-item.drag-target {
+  border-color: rgba(245, 158, 11, 0.62);
+}
+
+.upstream-list-item__order {
+  font-size: 0.76rem;
+  color: var(--muted);
+  letter-spacing: 0.08em;
+}
+
 .upstream-list-item__body {
   display: grid;
   gap: 4px;
@@ -703,7 +708,8 @@ textarea {
   text-overflow: ellipsis;
 }
 
-.upstream-list-item__body small {
+.upstream-list-item__body small,
+.upstream-list-item__drag {
   color: var(--muted);
 }
 
