@@ -199,6 +199,60 @@
                   <h2>上游列表</h2>
                   <p>点击查看，拖动排序。</p>
                 </div>
+
+                <form id="upstreamCloudForm" class="tool-block stack-form">
+                  <strong>云端上游同步</strong>
+                  <p>从 GitHub 拉取新的上游模块并自动重载。</p>
+
+                  <label class="checkbox-row">
+                    <input id="upstreamCloudEnabled" name="enabled" type="checkbox" />
+                    <span>启用云端同步</span>
+                  </label>
+
+                  <label class="checkbox-row">
+                    <input id="upstreamCloudAutoSync" name="autoSync" type="checkbox" />
+                    <span>发现更新后自动同步</span>
+                  </label>
+
+                  <label>
+                    <span>GitHub 仓库</span>
+                    <input id="upstreamCloudRepo" name="repo" type="text" placeholder="owner/repo" />
+                  </label>
+
+                  <label>
+                    <span>分支</span>
+                    <input id="upstreamCloudBranch" name="branch" type="text" placeholder="main" />
+                  </label>
+
+                  <label>
+                    <span>模块目录</span>
+                    <input id="upstreamCloudDirectory" name="directory" type="text" placeholder="src/upstreams/vendors" />
+                  </label>
+
+                  <div class="mini-status-grid">
+                    <div class="context-card">
+                      <span>同步状态</span>
+                      <strong id="upstreamCloudState">未检查</strong>
+                    </div>
+                    <div class="context-card">
+                      <span>云端版本</span>
+                      <strong id="upstreamCloudLatest">暂无</strong>
+                    </div>
+                    <div class="context-card">
+                      <span>最近同步</span>
+                      <strong id="upstreamCloudSyncedAt">暂无</strong>
+                    </div>
+                  </div>
+
+                  <p id="upstreamCloudHint" class="form-hint">保存后可手动检查或立即同步。</p>
+
+                  <div class="inline-actions">
+                    <button id="saveUpstreamCloudButton" class="primary-button slim-button" type="submit">保存云端配置</button>
+                    <button id="checkUpstreamCloudButton" class="ghost-button slim-button" type="button">检查云端</button>
+                    <button id="syncUpstreamCloudButton" class="ghost-button slim-button" type="button">立即同步</button>
+                  </div>
+                </form>
+
                 <div id="upstreamList" class="upstream-list"></div>
               </section>
 
@@ -318,6 +372,31 @@
                 <div class="panel-head compact-head">
                   <h2>系统设置</h2>
                   <p>这里只放全局配置。</p>
+                </div>
+
+                <div class="tool-block">
+                  <strong>系统版本</strong>
+                  <p id="appUpdateSummary">检测当前版本并手动触发在线更新。</p>
+
+                  <div class="mini-status-grid">
+                    <div class="context-card">
+                      <span>当前版本</span>
+                      <strong id="appCurrentVersion">暂无</strong>
+                    </div>
+                    <div class="context-card">
+                      <span>最新版本</span>
+                      <strong id="appLatestVersion">暂无</strong>
+                    </div>
+                    <div class="context-card">
+                      <span>更新状态</span>
+                      <strong id="appUpdateState">未检查</strong>
+                    </div>
+                  </div>
+
+                  <div class="inline-actions">
+                    <button id="checkUpdateButton" class="ghost-button slim-button" type="button">检查更新</button>
+                    <button id="runUpdateButton" class="primary-button slim-button" type="button">立即更新</button>
+                  </div>
                 </div>
 
                 <form id="systemForm" class="stack-form">

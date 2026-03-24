@@ -3,7 +3,9 @@
 const fs = require("node:fs");
 const path = require("node:path");
 
-const vendorsDir = path.join(__dirname, "..", "vendors");
+const { syncedUpstreamsDir } = require("../../dataPaths");
+
+const bundledVendorsDir = path.join(__dirname, "..", "vendors");
 
 let cachedState = null;
 
@@ -75,25 +77,44 @@ function loadModules() {
   }
 
   const nextState = createEmptyState();
-  const entries = fs.existsSync(vendorsDir) ? fs.readdirSync(vendorsDir, { withFileTypes: true }) : [];
+  const loadedIds = new Set();
+  const sourceDirs = [
+    { type: "synced", dir: syncedUpstreamsDir },
+    { type: "bundled", dir: bundledVendorsDir },
+  ];
 
-  entries.forEach((entry) => {
-    if (!entry.isDirectory()) {
-      return;
-    }
+  sourceDirs.forEach(({ type, dir }) => {
+    const entries = fs.existsSync(dir) ? fs.readdirSync(dir, { withFileTypes: true }) : [];
+    entries.forEach((entry) => {
+      if (!entry.isDirectory()) {
+        return;
+      }
 
-    const modulePath = path.join(vendorsDir, entry.name);
+      const modulePath = path.join(dir, entry.name);
 
-    try {
-      const candidate = validateModule(require(modulePath));
-      nextState.modules.push(candidate);
-    } catch (error) {
-      nextState.diagnostics.push({
-        id: entry.name,
-        modulePath,
-        message: error.message,
-      });
-    }
+      try {
+        const candidate = validateModule(require(modulePath));
+        if (loadedIds.has(candidate.manifest.id)) {
+          return;
+        }
+
+        const wrappedCandidate = {
+          ...candidate,
+          __source: {
+            type,
+            modulePath,
+          },
+        };
+        loadedIds.add(candidate.manifest.id);
+        nextState.modules.push(wrappedCandidate);
+      } catch (error) {
+        nextState.diagnostics.push({
+          id: entry.name,
+          modulePath,
+          message: error.message,
+        });
+      }
+    });
   });
 
   nextState.modules.sort((left, right) => left.manifest.id.localeCompare(right.manifest.id));
@@ -103,21 +124,25 @@ function loadModules() {
 }
 
 function reloadUpstreamModules() {
-  if (fs.existsSync(vendorsDir)) {
-    const entries = fs.readdirSync(vendorsDir, { withFileTypes: true });
+  [bundledVendorsDir, syncedUpstreamsDir].forEach((dir) => {
+    if (!fs.existsSync(dir)) {
+      return;
+    }
+
+    const entries = fs.readdirSync(dir, { withFileTypes: true });
     entries.forEach((entry) => {
       if (!entry.isDirectory()) {
         return;
       }
 
-      const modulePath = path.join(vendorsDir, entry.name);
+      const modulePath = path.join(dir, entry.name);
       try {
         delete require.cache[require.resolve(modulePath)];
       } catch (error) {
         // Ignore cache misses.
       }
     });
-  }
+  });
 
   cachedState = null;
   return loadModules().modules;

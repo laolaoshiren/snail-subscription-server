@@ -17,6 +17,7 @@ const {
   getActiveUpstreamRuntime,
   getDisplayOrigin,
   getRelayToken,
+  getUpstreamCloudConfig,
   listRelayUsers,
   listUpstreamConfigs,
   normalizeUserKey,
@@ -26,15 +27,21 @@ const {
   verifyPasswordLogin,
 } = require("./authStore");
 const {
+  buildAppUpdateStatus,
+  buildUpstreamCloudStatus,
+  ensureCloudUpstreamsReady,
+  invalidateCaches,
+  runSystemUpdate,
+  scheduleProcessRestart,
+  syncCloudUpstreams,
+} = require("./repoManager");
+const {
   appendUserHistory,
   getUserState,
   listUserStates,
   loadRelayState,
 } = require("./registrationStore");
-const {
-  listUpstreamModuleDiagnostics,
-  reloadUpstreamModules,
-} = require("./upstreams/core/registry");
+const { listUpstreamModuleDiagnostics, reloadUpstreamModules } = require("./upstreams/core/registry");
 const { URL_TYPES } = require("./upstreams/shared/snailApi");
 const {
   getRuntimeCandidateUpstreamIds,
@@ -798,9 +805,22 @@ async function handleSession(request, response) {
   }
 
   const origin = await getRequestOrigin(request);
-  const { activeUpstreamId, activeUpstreamMode, upstreamOrder } = await getActiveUpstreamRuntime();
-  const displayOrigin = await getDisplayOrigin();
-  const relayUsers = await listRelayUsers();
+  await ensureCloudUpstreamsReady();
+  const [
+    { activeUpstreamId, activeUpstreamMode, upstreamOrder },
+    displayOrigin,
+    relayUsers,
+    appUpdate,
+    upstreamCloudStatus,
+    upstreamCloud,
+  ] = await Promise.all([
+    getActiveUpstreamRuntime(),
+    getDisplayOrigin(),
+    listRelayUsers(),
+    buildAppUpdateStatus(false),
+    buildUpstreamCloudStatus(false),
+    getUpstreamCloudConfig(),
+  ]);
   const upstreams = await listUpstreamConfigs();
   const userStates = await listUserStates(activeUpstreamId);
   const stateByUser = Object.fromEntries(userStates.map((item) => [item.userKey, item]));
@@ -836,6 +856,12 @@ async function handleSession(request, response) {
     relayUrlsByUser,
     userSummaries,
     defaultUserKey: DEFAULT_USER_KEY,
+    appUpdate,
+    upstreamCloud: {
+      ...upstreamCloudStatus,
+      config: upstreamCloud,
+    },
+    upstreamCloudStatus,
   });
 }
 
@@ -860,6 +886,7 @@ async function handleUpdateSettings(request, response) {
     activeUpstreamId: body.activeUpstreamId,
     activeUpstreamMode: body.activeUpstreamMode,
     upstreamOrder: body.upstreamOrder,
+    upstreamCloud: body.upstreamCloud,
     upstreamId: body.upstreamId,
     runtimeMode: body.runtimeMode,
     trafficThresholdPercent: body.trafficThresholdPercent,
@@ -872,6 +899,10 @@ async function handleUpdateSettings(request, response) {
     enabled: body.enabled,
   });
 
+  if (body.upstreamCloud !== undefined) {
+    invalidateCaches();
+  }
+
   sendJson(response, 200, {
     success: true,
     message: "Settings updated.",
@@ -879,6 +910,7 @@ async function handleUpdateSettings(request, response) {
     activeUpstreamMode: result.activeUpstreamMode,
     displayOrigin: result.displayOrigin,
     upstreamOrder: result.upstreamOrder,
+    upstreamCloud: result.upstreamCloud,
     updatedAt: result.updatedAt,
     upstreamConfig: result.upstreamConfig,
   });
@@ -888,6 +920,7 @@ async function handleReloadUpstreams(response) {
   reloadUpstreamModules();
   const upstreams = await listUpstreamConfigs();
   const diagnostics = listUpstreamModuleDiagnostics();
+  const upstreamCloudStatus = await buildUpstreamCloudStatus(true);
 
   sendJson(response, 200, {
     success: true,
@@ -895,6 +928,60 @@ async function handleReloadUpstreams(response) {
       diagnostics.length > 0
         ? `Upstream modules reloaded with ${diagnostics.length} issue(s).`
         : "Upstream modules reloaded.",
+    upstreams,
+    upstreamCloudStatus,
+    diagnostics,
+  });
+}
+
+async function handleCheckAppUpdate(response) {
+  const appUpdate = await buildAppUpdateStatus(true);
+  sendJson(response, 200, {
+    success: true,
+    appUpdate,
+  });
+}
+
+async function handleStartAppUpdate(response) {
+  const result = await runSystemUpdate();
+  sendJson(response, 200, {
+    success: true,
+    message: result.updated ? "Online update completed. Server will restart." : "Already up to date.",
+    appUpdate: result.status,
+    restartRequired: Boolean(result.restartRequired),
+  });
+
+  if (result.restartRequired) {
+    scheduleProcessRestart();
+    setTimeout(() => {
+      server.close(() => {
+        process.exit(0);
+      });
+    }, 250);
+  }
+}
+
+async function handleCheckUpstreamCloud(response) {
+  const upstreamCloud = await buildUpstreamCloudStatus(true);
+  sendJson(response, 200, {
+    success: true,
+    upstreamCloud,
+  });
+}
+
+async function handleSyncUpstreamCloud(response) {
+  const result = await syncCloudUpstreams();
+  const upstreams = await listUpstreamConfigs();
+  const diagnostics = listUpstreamModuleDiagnostics();
+  const upstreamCloud = await buildUpstreamCloudStatus(true);
+
+  sendJson(response, 200, {
+    success: true,
+    message: result.synced ? "Cloud upstream modules synchronized." : "Cloud upstream modules are current.",
+    upstreamCloud,
+    synced: Boolean(result.synced),
+    syncedAt: result.syncedAt || "",
+    syncedModuleIds: Array.isArray(result.syncedModuleIds) ? result.syncedModuleIds : [],
     upstreams,
     diagnostics,
   });
@@ -1204,6 +1291,26 @@ async function requestListener(request, response) {
 
       if (request.method === "POST" && url.pathname === "/api/upstreams/reload") {
         await handleReloadUpstreams(response);
+        return;
+      }
+
+      if (request.method === "POST" && url.pathname === "/api/upstreams/cloud/check") {
+        await handleCheckUpstreamCloud(response);
+        return;
+      }
+
+      if (request.method === "POST" && url.pathname === "/api/upstreams/cloud/sync") {
+        await handleSyncUpstreamCloud(response);
+        return;
+      }
+
+      if (request.method === "POST" && url.pathname === "/api/system/check-update") {
+        await handleCheckAppUpdate(response);
+        return;
+      }
+
+      if (request.method === "POST" && url.pathname === "/api/system/update") {
+        await handleStartAppUpdate(response);
         return;
       }
 

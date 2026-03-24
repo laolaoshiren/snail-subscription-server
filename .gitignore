@@ -1,3 +1,5 @@
 node_modules/
 data/*.json
+data/.tmp/
+src/upstreams/synced-vendors/
 server*.log

@@ -32,6 +32,14 @@ const ACTIVE_UPSTREAM_MODES = Object.freeze({
   SINGLE: "single",
   POLLING: "polling",
 });
+const DEFAULT_UPSTREAM_CLOUD = Object.freeze({
+  enabled: true,
+  autoSync: true,
+  repoOwner: "laolaoshiren",
+  repoName: "snail-subscription-server",
+  branch: "main",
+  directory: "src/upstreams/vendors",
+});
 
 function hashPassword(password, salt) {
   return crypto.scryptSync(password, salt, 64).toString("hex");
@@ -98,6 +106,32 @@ function normalizeRelayTokens(tokens, legacyRelayToken = "") {
   });
 
   return nextTokens;
+}
+
+function normalizeGitHubSegment(value, fallback = "") {
+  return (value || fallback).toString().trim().replace(/^\/+|\/+$/g, "");
+}
+
+function normalizeRepoDirectory(value, fallback = DEFAULT_UPSTREAM_CLOUD.directory) {
+  const normalized = (value || fallback)
+    .toString()
+    .trim()
+    .replace(/\\/g, "/")
+    .replace(/^\/+|\/+$/g, "");
+  return normalized || DEFAULT_UPSTREAM_CLOUD.directory;
+}
+
+function normalizeUpstreamCloudSettings(input = {}) {
+  const source = input && typeof input === "object" ? input : {};
+
+  return {
+    enabled: source.enabled !== false,
+    autoSync: Boolean(source.autoSync),
+    repoOwner: normalizeGitHubSegment(source.repoOwner, DEFAULT_UPSTREAM_CLOUD.repoOwner),
+    repoName: normalizeGitHubSegment(source.repoName, DEFAULT_UPSTREAM_CLOUD.repoName),
+    branch: normalizeGitHubSegment(source.branch, DEFAULT_UPSTREAM_CLOUD.branch) || DEFAULT_UPSTREAM_CLOUD.branch,
+    directory: normalizeRepoDirectory(source.directory, DEFAULT_UPSTREAM_CLOUD.directory),
+  };
 }
 
 function normalizeUpstreamConfigs(rawUpstreams, legacyRuntimeMode) {
@@ -185,6 +219,7 @@ function createSecurityState(password, options = {}) {
   const upstreams = normalizeUpstreamConfigs(options.upstreams, options.runtimeMode);
   const upstreamOrder = normalizeUpstreamOrder(options.upstreamOrder, upstreams);
   const activeUpstreamMode = normalizeActiveUpstreamMode(options.activeUpstreamMode);
+  const upstreamCloud = normalizeUpstreamCloudSettings(options.upstreamCloud);
 
   return {
     passwordSalt: salt,
@@ -195,6 +230,7 @@ function createSecurityState(password, options = {}) {
     activeUpstreamMode,
     upstreamOrder,
     upstreams,
+    upstreamCloud,
     updatedAt: new Date().toISOString(),
   };
 }
@@ -207,6 +243,7 @@ function normalizePanelState(rawState = {}) {
   const upstreams = normalizeUpstreamConfigs(rawState.upstreams, rawState.runtimeMode);
   const upstreamOrder = normalizeUpstreamOrder(rawState.upstreamOrder, upstreams);
   const activeUpstreamMode = normalizeActiveUpstreamMode(rawState.activeUpstreamMode);
+  const upstreamCloud = normalizeUpstreamCloudSettings(rawState.upstreamCloud);
 
   return {
     passwordSalt: rawState.passwordSalt,
@@ -217,6 +254,7 @@ function normalizePanelState(rawState = {}) {
     activeUpstreamMode,
     upstreamOrder,
     upstreams,
+    upstreamCloud,
     updatedAt: rawState.updatedAt || new Date().toISOString(),
   };
 }
@@ -286,6 +324,7 @@ async function updatePassword({ currentPassword, newPassword }) {
     activeUpstreamMode: state.activeUpstreamMode,
     upstreamOrder: state.upstreamOrder,
     upstreams: state.upstreams,
+    upstreamCloud: state.upstreamCloud,
   });
   await saveSecurityState(nextState);
   return {
@@ -342,6 +381,11 @@ async function getUpstreamConfig(upstreamId) {
   return state.upstreams[resolvedUpstreamId] || null;
 }
 
+async function getUpstreamCloudConfig() {
+  const state = await loadSecurityState();
+  return normalizeUpstreamCloudSettings(state.upstreamCloud);
+}
+
 async function listUpstreamConfigs() {
   const state = await loadSecurityState();
   const orderedIds = normalizeUpstreamOrder(state.upstreamOrder, state.upstreams);
@@ -368,6 +412,7 @@ async function listUpstreamConfigs() {
           : [],
         remark: state.upstreams[module.manifest.id]?.remark || "",
         settingFields: Array.isArray(module.manifest.settingFields) ? module.manifest.settingFields : [],
+        sourceType: module.__source?.type || "bundled",
         config: state.upstreams[module.manifest.id],
         orderIndex: index,
         active:
@@ -413,6 +458,13 @@ async function updatePanelSettings(settings = {}) {
     nextState.upstreamOrder = normalizeUpstreamOrder(settings.upstreamOrder, nextState.upstreams);
   }
 
+  if (settings.upstreamCloud !== undefined) {
+    nextState.upstreamCloud = normalizeUpstreamCloudSettings({
+      ...nextState.upstreamCloud,
+      ...settings.upstreamCloud,
+    });
+  }
+
   const targetUpstreamId = settings.upstreamId || nextState.activeUpstreamId;
   if (targetUpstreamId) {
     const module = getUpstreamModule(targetUpstreamId);
@@ -448,6 +500,7 @@ async function updatePanelSettings(settings = {}) {
     activeUpstreamMode: nextState.activeUpstreamMode,
     displayOrigin: nextState.displayOrigin,
     upstreamOrder: nextState.upstreamOrder,
+    upstreamCloud: nextState.upstreamCloud,
     updatedAt: nextState.updatedAt,
     upstreamConfig: nextState.upstreams[nextState.activeUpstreamId],
   };
@@ -466,6 +519,7 @@ module.exports = {
   getDisplayOrigin,
   getRelayToken,
   getUpstreamConfig,
+  getUpstreamCloudConfig,
   isUserKey,
   listRelayUsers,
   listUpstreamConfigs,

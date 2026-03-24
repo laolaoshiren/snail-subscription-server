@@ -677,6 +677,45 @@ textarea {
   padding: 14px;
 }
 
+.mini-status-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.inline-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.slim-button {
+  padding: 9px 14px;
+}
+
+.tool-block.stack-form {
+  gap: 14px;
+}
+
+.mini-status-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.inline-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.slim-button {
+  min-height: 44px;
+  padding: 0 18px;
+}
+
 .tool-block strong,
 .system-note strong {
   display: block;
@@ -718,6 +757,7 @@ code {
   .compact-switcher,
   .form-grid,
   .mode-boxes,
+  .mini-status-grid,
   .provider-settings,
   .links-grid,
   .meta-grid,
@@ -725,6 +765,10 @@ code {
   .context-stack,
   .overview-stack {
     grid-template-columns: 1fr;
+  }
+
+  .inline-actions {
+    flex-direction: column;
   }
 }
 

@@ -11,6 +11,12 @@ const systemForm = document.querySelector("#systemForm");
 const passwordForm = document.querySelector("#passwordForm");
 const logoutButton = document.querySelector("#logoutButton");
 const reloadUpstreamsButton = document.querySelector("#reloadUpstreamsButton");
+const checkUpdateButton = document.querySelector("#checkUpdateButton");
+const runUpdateButton = document.querySelector("#runUpdateButton");
+const upstreamCloudForm = document.querySelector("#upstreamCloudForm");
+const checkUpstreamCloudButton = document.querySelector("#checkUpstreamCloudButton");
+const syncUpstreamCloudButton = document.querySelector("#syncUpstreamCloudButton");
+const saveUpstreamCloudButton = document.querySelector("#saveUpstreamCloudButton");
 
 const statusBar = document.querySelector("#statusBar");
 const linksList = document.querySelector("#linksList");
@@ -58,6 +64,19 @@ const upstreamInviteCodeInput = document.querySelector("#upstreamInviteCode");
 const trafficThresholdInput = document.querySelector("#trafficThresholdPercent");
 const maxRegistrationAgeInput = document.querySelector("#maxRegistrationAgeMinutes");
 const subscriptionUpdateIntervalInput = document.querySelector("#subscriptionUpdateIntervalMinutes");
+const upstreamCloudEnabledInput = document.querySelector("#upstreamCloudEnabled");
+const upstreamCloudAutoSyncInput = document.querySelector("#upstreamCloudAutoSync");
+const upstreamCloudRepoInput = document.querySelector("#upstreamCloudRepo");
+const upstreamCloudBranchInput = document.querySelector("#upstreamCloudBranch");
+const upstreamCloudDirectoryInput = document.querySelector("#upstreamCloudDirectory");
+const upstreamCloudState = document.querySelector("#upstreamCloudState");
+const upstreamCloudLatest = document.querySelector("#upstreamCloudLatest");
+const upstreamCloudSyncedAt = document.querySelector("#upstreamCloudSyncedAt");
+const upstreamCloudHint = document.querySelector("#upstreamCloudHint");
+const appCurrentVersion = document.querySelector("#appCurrentVersion");
+const appLatestVersion = document.querySelector("#appLatestVersion");
+const appUpdateState = document.querySelector("#appUpdateState");
+const appUpdateSummary = document.querySelector("#appUpdateSummary");
 
 const loginButton = document.querySelector("#loginButton");
 const registerButton = document.querySelector("#registerButton");
@@ -91,6 +110,10 @@ const state = {
   activeUpstreamMode: ACTIVE_UPSTREAM_MODES.SINGLE,
   selectedUpstreamId: "",
   currentTab: "subscription",
+  appUpdate: null,
+  upstreamCloud: null,
+  announcedUpdateKey: "",
+  updateReconnectTimer: null,
 };
 let draggingUpstreamId = "";
 
@@ -338,6 +361,30 @@ function formatDateTime(value) {
   return date.toLocaleString();
 }
 
+function formatCommit(value) {
+  if (!value) {
+    return "暂无";
+  }
+
+  const text = value.toString().trim();
+  return text.length > 12 ? text.slice(0, 12) : text;
+}
+
+function parseRepoInput(value) {
+  const parts = (value || "")
+    .toString()
+    .trim()
+    .replace(/^https?:\/\/github\.com\//i, "")
+    .replace(/\.git$/i, "")
+    .split("/")
+    .filter(Boolean);
+
+  return {
+    repoOwner: parts[0] || "",
+    repoName: parts[1] || "",
+  };
+}
+
 function formatBytes(value) {
   if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
     return "暂无";
@@ -458,7 +505,7 @@ function renderUpstreamList() {
       <span class="upstream-list-item__order">${String(index + 1).padStart(2, "0")}</span>
       <span class="upstream-list-item__body">
         <strong>${upstream.label || upstream.id}</strong>
-        <small>${upstream.config?.enabled === false ? "已停用" : upstream.id}</small>
+        <small>${upstream.config?.enabled === false ? "已停用" : upstream.sourceType === "synced" ? `${upstream.id} · 云端` : upstream.id}</small>
       </span>
       <span class="upstream-list-item__drag">⋮⋮</span>
     `;
@@ -893,6 +940,123 @@ function syncSystemForm() {
   setInputValue(displayOriginInput, state.displayOrigin || "");
 }
 
+function renderAppUpdateStatus() {
+  const status = state.appUpdate || {};
+  const currentVersionText = status.currentVersion
+    ? `${status.currentVersion}${status.currentCommitSha ? ` · ${formatCommit(status.currentCommitSha)}` : ""}`
+    : "暂无";
+  const latestVersionText = status.latestVersion
+    ? `${status.latestVersion}${status.latestCommitSha ? ` · ${formatCommit(status.latestCommitSha)}` : ""}`
+    : "暂无";
+
+  let stateText = "未检查";
+  let summary = "检测当前版本并手动触发在线更新。";
+
+  if (status.updating) {
+    stateText = "更新中";
+    summary = "更新任务已启动，完成后会自动重启服务。";
+  } else if (status.checking) {
+    stateText = "检查中";
+    summary = "正在检查 GitHub 上的最新版本。";
+  } else if (!status.supported) {
+    stateText = "只读";
+    summary = "当前部署环境只能显示版本，不能直接在线更新。";
+  } else if (status.lastError) {
+    stateText = "检查失败";
+    summary = status.lastError;
+  } else if (status.updateAvailable) {
+    stateText = "发现更新";
+    summary = "检测到新版本，手动确认后才会开始更新。";
+  } else if (status.currentVersion) {
+    stateText = "已是最新";
+    summary = "当前程序已经是最新版本。";
+  }
+
+  setText(appCurrentVersion, currentVersionText);
+  setText(appLatestVersion, latestVersionText);
+  setText(appUpdateState, stateText);
+  setText(appUpdateSummary, summary);
+
+  if (checkUpdateButton) {
+    checkUpdateButton.disabled = Boolean(status.checking || status.updating);
+  }
+  if (runUpdateButton) {
+    runUpdateButton.disabled = Boolean(
+      !status.supported || !status.updateAvailable || status.checking || status.updating,
+    );
+  }
+}
+
+function syncUpstreamCloudForm() {
+  const status = state.upstreamCloud || {};
+  const config = status.config || {};
+  const repoText =
+    config.repoOwner && config.repoName
+      ? `${config.repoOwner}/${config.repoName}`
+      : "";
+
+  setCheckboxValue(upstreamCloudEnabledInput, config.enabled !== false);
+  setCheckboxValue(upstreamCloudAutoSyncInput, config.autoSync);
+  setInputValue(upstreamCloudRepoInput, repoText);
+  setInputValue(upstreamCloudBranchInput, config.branch || "main");
+  setInputValue(upstreamCloudDirectoryInput, config.directory || "src/upstreams/vendors");
+
+  let stateText = "未检查";
+  let hintText = "保存后可手动检查或立即同步。";
+
+  if (status.syncing) {
+    stateText = "同步中";
+    hintText = "正在下载并重载云端上游模块。";
+  } else if (status.checking) {
+    stateText = "检查中";
+    hintText = "正在检查云端模块是否有更新。";
+  } else if (status.lastError) {
+    stateText = "失败";
+    hintText = status.lastError;
+  } else if (config.enabled === false) {
+    stateText = "已停用";
+    hintText = "启用后才会检查和同步云端模块。";
+  } else if (status.updateAvailable) {
+    stateText = "发现更新";
+    hintText = "云端有新的上游模块，可立即同步。";
+  } else if (status.lastSyncedAt) {
+    stateText = "已同步";
+    hintText = "当前云端模块已经同步到本地。";
+  }
+
+  setText(upstreamCloudState, stateText);
+  setText(upstreamCloudLatest, formatCommit(status.latestCommitSha));
+  setText(upstreamCloudSyncedAt, formatDateTime(status.lastSyncedAt));
+  setText(upstreamCloudHint, hintText);
+
+  if (checkUpstreamCloudButton) {
+    checkUpstreamCloudButton.disabled = Boolean(status.syncing || status.checking || config.enabled === false);
+  }
+  if (syncUpstreamCloudButton) {
+    syncUpstreamCloudButton.disabled = Boolean(status.syncing || status.checking || config.enabled === false);
+  }
+  if (saveUpstreamCloudButton) {
+    saveUpstreamCloudButton.disabled = Boolean(status.syncing);
+  }
+}
+
+function announceAvailableUpdate() {
+  const status = state.appUpdate || {};
+  if (!status.updateAvailable) {
+    return;
+  }
+
+  const nextKey = `${status.latestVersion || ""}:${status.latestCommitSha || ""}`;
+  if (!nextKey || state.announcedUpdateKey === nextKey) {
+    return;
+  }
+
+  state.announcedUpdateKey = nextKey;
+  if (statusBar?.classList.contains("hidden")) {
+    setStatus(`发现新版本，可在系统页更新。`, "warning");
+  }
+}
+
 function updateSummaryFromPayload(payload) {
   const currentUser = getCurrentUser();
   const nextSummary = {
@@ -1040,6 +1204,8 @@ function applySession(payload) {
   state.userSummaries = Array.isArray(payload.userSummaries) ? payload.userSummaries : [];
   state.activeUpstreamId = payload.activeUpstreamId || state.upstreams[0]?.id || "";
   state.activeUpstreamMode = payload.activeUpstreamMode || ACTIVE_UPSTREAM_MODES.SINGLE;
+  state.appUpdate = payload.appUpdate || null;
+  state.upstreamCloud = payload.upstreamCloud || null;
 
   if (!state.users.some((user) => user.key === state.currentUserKey)) {
     state.currentUserKey = payload.defaultUserKey || state.users[0]?.key || "userA";
@@ -1054,6 +1220,9 @@ function applySession(payload) {
   renderUserSwitcher();
   syncUpstreamForm();
   syncSystemForm();
+  renderAppUpdateStatus();
+  syncUpstreamCloudForm();
+  announceAvailableUpdate();
 }
 
 function applyUserPayload(payload) {
@@ -1117,6 +1286,46 @@ async function refreshSession() {
   } catch (error) {
     setStatus(error.message, "error");
   }
+}
+
+function beginUpdateReconnectPolling() {
+  if (state.updateReconnectTimer) {
+    window.clearTimeout(state.updateReconnectTimer);
+    state.updateReconnectTimer = null;
+  }
+
+  let attempts = 0;
+
+  const poll = async () => {
+    attempts += 1;
+
+    try {
+      const payload = await requestJson("/api/session", { method: "GET" });
+      if (payload.authenticated) {
+        showDashboard();
+        applySession(payload);
+        await loadUserState();
+
+        if (!payload.appUpdate?.updating) {
+          state.updateReconnectTimer = null;
+          setStatus("系统更新完成。", "success");
+          return;
+        }
+      }
+    } catch (error) {
+      // Ignore temporary restart failures while the service is rebooting.
+    }
+
+    if (attempts >= 60) {
+      state.updateReconnectTimer = null;
+      setStatus("更新后的自动重连超时，请手动刷新页面。", "warning");
+      return;
+    }
+
+    state.updateReconnectTimer = window.setTimeout(poll, 3000);
+  };
+
+  state.updateReconnectTimer = window.setTimeout(poll, 3000);
 }
 
 if (loginForm) {
@@ -1276,6 +1485,45 @@ if (systemForm) {
   });
 }
 
+if (upstreamCloudForm) {
+  upstreamCloudForm.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    clearStatus();
+    setLoading(saveUpstreamCloudButton, "保存中...", true);
+
+    const repo = parseRepoInput(upstreamCloudRepoInput?.value || "");
+
+    try {
+      await requestJson("/api/settings", {
+        method: "POST",
+        body: JSON.stringify({
+          upstreamCloud: {
+            enabled: upstreamCloudEnabledInput?.checked,
+            autoSync: upstreamCloudAutoSyncInput?.checked,
+            repoOwner: repo.repoOwner,
+            repoName: repo.repoName,
+            branch: (upstreamCloudBranchInput?.value || "").trim(),
+            directory: (upstreamCloudDirectoryInput?.value || "").trim(),
+          },
+        }),
+      });
+
+      await refreshSession();
+      setStatus("云端上游配置已更新。", "success");
+    } catch (error) {
+      if (error.status === 401) {
+        showLogin();
+        setStatus("登录状态已失效，请重新输入密码。", "error");
+        return;
+      }
+
+      setStatus(error.message, "error");
+    } finally {
+      setLoading(saveUpstreamCloudButton, "保存中...", false);
+    }
+  });
+}
+
 if (passwordForm) {
   passwordForm.addEventListener("submit", async (event) => {
     event.preventDefault();
@@ -1311,6 +1559,62 @@ if (passwordForm) {
   });
 }
 
+if (checkUpdateButton) {
+  checkUpdateButton.addEventListener("click", async () => {
+    clearStatus();
+    setLoading(checkUpdateButton, "检查中...", true);
+
+    try {
+      const payload = await requestJson("/api/system/check-update", { method: "POST" });
+      state.appUpdate = payload.appUpdate || state.appUpdate;
+      renderAppUpdateStatus();
+      setStatus(
+        payload.appUpdate?.updateAvailable ? "检测到新版本，可手动更新。" : "当前已经是最新版本。",
+        payload.appUpdate?.updateAvailable ? "warning" : "success",
+      );
+    } catch (error) {
+      if (error.status === 401) {
+        showLogin();
+        setStatus("登录状态已失效，请重新输入密码。", "error");
+        return;
+      }
+
+      setStatus(error.message, "error");
+    } finally {
+      setLoading(checkUpdateButton, "检查中...", false);
+    }
+  });
+}
+
+if (runUpdateButton) {
+  runUpdateButton.addEventListener("click", async () => {
+    clearStatus();
+    setLoading(runUpdateButton, "更新中...", true);
+
+    try {
+      const payload = await requestJson("/api/system/update", { method: "POST" });
+      state.appUpdate = payload.appUpdate || state.appUpdate;
+      renderAppUpdateStatus();
+      if (payload.restartRequired) {
+        setStatus("系统更新已完成，服务会自动重启。", "warning");
+        beginUpdateReconnectPolling();
+      } else {
+        setStatus("当前已经是最新版本。", "success");
+      }
+    } catch (error) {
+      if (error.status === 401) {
+        showLogin();
+        setStatus("登录状态已失效，请重新输入密码。", "error");
+        return;
+      }
+
+      setStatus(error.message, "error");
+    } finally {
+      setLoading(runUpdateButton, "立即更新", false);
+    }
+  });
+}
+
 if (reloadUpstreamsButton) {
   reloadUpstreamsButton.addEventListener("click", async () => {
     clearStatus();
@@ -1335,6 +1639,66 @@ if (reloadUpstreamsButton) {
       setStatus(error.message, "error");
     } finally {
       setLoading(reloadUpstreamsButton, "重载中...", false);
+    }
+  });
+}
+
+if (checkUpstreamCloudButton) {
+  checkUpstreamCloudButton.addEventListener("click", async () => {
+    clearStatus();
+    setLoading(checkUpstreamCloudButton, "检查中...", true);
+
+    try {
+      const payload = await requestJson("/api/upstreams/cloud/check", { method: "POST" });
+      state.upstreamCloud = payload.upstreamCloud || state.upstreamCloud;
+      syncUpstreamCloudForm();
+      setStatus(
+        payload.upstreamCloud?.updateAvailable ? "云端检测到新模块，可立即同步。" : "云端上游已是最新状态。",
+        payload.upstreamCloud?.updateAvailable ? "warning" : "success",
+      );
+    } catch (error) {
+      if (error.status === 401) {
+        showLogin();
+        setStatus("登录状态已失效，请重新输入密码。", "error");
+        return;
+      }
+
+      setStatus(error.message, "error");
+    } finally {
+      setLoading(checkUpstreamCloudButton, "检查中...", false);
+    }
+  });
+}
+
+if (syncUpstreamCloudButton) {
+  syncUpstreamCloudButton.addEventListener("click", async () => {
+    clearStatus();
+    setLoading(syncUpstreamCloudButton, "同步中...", true);
+
+    try {
+      const payload = await requestJson("/api/upstreams/cloud/sync", { method: "POST" });
+      state.upstreamCloud = payload.upstreamCloud || state.upstreamCloud;
+      await refreshSession();
+      if (!payload.synced) {
+        setStatus("云端上游已是最新状态。", "success");
+      } else {
+        setStatus(
+          Array.isArray(payload.diagnostics) && payload.diagnostics.length > 0
+            ? `云端模块已同步，但有 ${payload.diagnostics.length} 个模块未通过校验。`
+            : "云端上游模块已同步并重载。",
+          Array.isArray(payload.diagnostics) && payload.diagnostics.length > 0 ? "warning" : "success",
+        );
+      }
+    } catch (error) {
+      if (error.status === 401) {
+        showLogin();
+        setStatus("登录状态已失效，请重新输入密码。", "error");
+        return;
+      }
+
+      setStatus(error.message, "error");
+    } finally {
+      setLoading(syncUpstreamCloudButton, "同步中...", false);
     }
   });
 }
