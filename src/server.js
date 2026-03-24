@@ -198,6 +198,213 @@ function toProfileUpdateIntervalHours(minutes) {
   return String(Math.max(1, Math.ceil(minutes / 60)));
 }
 
+function escapeRegExp(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function createRandomNodeName() {
+  return crypto.randomBytes(6).toString("hex");
+}
+
+function isAdvertisementNodeName(value) {
+  const text = (value || "").toString().trim();
+  if (!text) {
+    return false;
+  }
+
+  return /(?:https?:\/\/|www\.)?(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+(?:[a-z]{2,63}|xn--[a-z0-9-]{2,59})\b/i.test(
+    text,
+  );
+}
+
+function getSanitizedNodeName(name, nameMap) {
+  if (!isAdvertisementNodeName(name)) {
+    return name;
+  }
+
+  if (!nameMap.has(name)) {
+    let replacement = "";
+    do {
+      replacement = createRandomNodeName();
+    } while (nameMap.has(replacement));
+    nameMap.set(name, replacement);
+  }
+
+  return nameMap.get(name);
+}
+
+function sanitizeJsonSubscriptionBody(rawBody) {
+  const nameMap = new Map();
+  const directNameKeys = new Set(["tag", "name", "ps", "remarks"]);
+  const referenceArrayKeys = new Set(["outbounds", "proxies"]);
+
+  function visit(value, parentKey = "") {
+    if (Array.isArray(value)) {
+      return value.map((item) =>
+        typeof item === "string" && referenceArrayKeys.has(parentKey)
+          ? getSanitizedNodeName(item, nameMap)
+          : visit(item, parentKey),
+      );
+    }
+
+    if (!value || typeof value !== "object") {
+      return value;
+    }
+
+    return Object.fromEntries(
+      Object.entries(value).map(([key, entryValue]) => {
+        if (typeof entryValue === "string" && directNameKeys.has(key)) {
+          return [key, getSanitizedNodeName(entryValue, nameMap)];
+        }
+
+        if (Array.isArray(entryValue) && referenceArrayKeys.has(key)) {
+          return [
+            key,
+            entryValue.map((item) =>
+              typeof item === "string" ? getSanitizedNodeName(item, nameMap) : visit(item, key),
+            ),
+          ];
+        }
+
+        return [key, visit(entryValue, key)];
+      }),
+    );
+  }
+
+  return JSON.stringify(visit(JSON.parse(rawBody)));
+}
+
+function normalizeBase64Padding(value) {
+  const remainder = value.length % 4;
+  if (remainder === 0) {
+    return value;
+  }
+
+  return value.padEnd(value.length + (4 - remainder), "=");
+}
+
+function tryDecodeBase64(value) {
+  const normalized = normalizeBase64Padding(value.replace(/-/g, "+").replace(/_/g, "/"));
+
+  try {
+    return Buffer.from(normalized, "base64").toString("utf8");
+  } catch (error) {
+    return "";
+  }
+}
+
+function encodeBase64(value) {
+  return Buffer.from(value, "utf8").toString("base64");
+}
+
+function sanitizeUriLine(line, nameMap) {
+  const trimmed = line.trim();
+  if (!trimmed) {
+    return line;
+  }
+
+  if (/^vmess:\/\//i.test(trimmed)) {
+    const encoded = trimmed.slice("vmess://".length);
+    const decoded = tryDecodeBase64(encoded);
+    if (!decoded) {
+      return line;
+    }
+
+    try {
+      const payload = JSON.parse(decoded);
+      if (typeof payload.ps === "string") {
+        payload.ps = getSanitizedNodeName(payload.ps, nameMap);
+      }
+      return `vmess://${encodeBase64(JSON.stringify(payload))}`;
+    } catch (error) {
+      return line;
+    }
+  }
+
+  const hashIndex = trimmed.indexOf("#");
+  if (hashIndex < 0) {
+    return line;
+  }
+
+  const prefix = trimmed.slice(0, hashIndex + 1);
+  const rawName = trimmed.slice(hashIndex + 1);
+  const decodedName = (() => {
+    try {
+      return decodeURIComponent(rawName);
+    } catch (error) {
+      return rawName;
+    }
+  })();
+  const sanitizedName = getSanitizedNodeName(decodedName, nameMap);
+
+  if (sanitizedName === decodedName) {
+    return line;
+  }
+
+  return `${prefix}${encodeURIComponent(sanitizedName)}`;
+}
+
+function sanitizeEncodedSubscriptionBody(rawBody) {
+  const decoded = tryDecodeBase64(rawBody.trim());
+  if (!decoded || !/:\/\//.test(decoded)) {
+    return rawBody;
+  }
+
+  const nameMap = new Map();
+  const sanitizedLines = decoded
+    .split(/\r?\n/)
+    .map((line) => sanitizeUriLine(line, nameMap))
+    .join("\n");
+
+  return encodeBase64(sanitizedLines);
+}
+
+function sanitizeYamlSubscriptionBody(rawBody) {
+  const nameMap = new Map();
+  let result = rawBody
+    .replace(/(name:\s*)(['"])(.*?)\2/g, (match, prefix, quote, name) => {
+      const sanitizedName = getSanitizedNodeName(name, nameMap);
+      return `${prefix}${quote}${sanitizedName}${quote}`;
+    })
+    .replace(/(name:\s*)([^,'"\r\n}][^,\r\n}]*)/g, (match, prefix, name) => {
+      const sanitizedName = getSanitizedNodeName(name.trim(), nameMap);
+      return sanitizedName === name.trim() ? match : `${prefix}${sanitizedName}`;
+    });
+
+  for (const [sourceName, targetName] of nameMap.entries()) {
+    const quotedPattern = new RegExp(`(['"])${escapeRegExp(sourceName)}\\1`, "g");
+    result = result.replace(quotedPattern, (match, quote) => `${quote}${targetName}${quote}`);
+  }
+
+  return result;
+}
+
+function sanitizeSubscriptionBody(bodyBuffer) {
+  const rawBody = bodyBuffer.toString("utf8");
+  const trimmedBody = rawBody.trim();
+
+  if (!trimmedBody) {
+    return bodyBuffer;
+  }
+
+  try {
+    if (trimmedBody.startsWith("{") || trimmedBody.startsWith("[")) {
+      return Buffer.from(sanitizeJsonSubscriptionBody(rawBody), "utf8");
+    }
+  } catch (error) {
+    // Ignore JSON parse failures and fall through to other formats.
+  }
+
+  if (/^[A-Za-z0-9+/=\r\n_-]+$/.test(trimmedBody) && trimmedBody.length > 32) {
+    const sanitizedEncodedBody = sanitizeEncodedSubscriptionBody(rawBody);
+    if (sanitizedEncodedBody !== rawBody) {
+      return Buffer.from(sanitizedEncodedBody, "utf8");
+    }
+  }
+
+  return Buffer.from(sanitizeYamlSubscriptionBody(rawBody), "utf8");
+}
+
 function sanitizeRegistration(record) {
   if (!record) {
     return null;
@@ -347,6 +554,31 @@ async function fetchUpstreamSubscription(upstreamUrl) {
   return fetch(upstreamUrl, {
     signal: AbortSignal.timeout(RELAY_FETCH_TIMEOUT_MS),
   });
+}
+
+async function fetchFallbackSubscriptionUserInfoHeader(clientUrls, requestedType) {
+  if (!clientUrls || requestedType === "clash") {
+    return "";
+  }
+
+  const clashUrl = clientUrls.clash;
+  const requestedUrl = clientUrls[requestedType];
+  if (!clashUrl || clashUrl === requestedUrl) {
+    return "";
+  }
+
+  try {
+    const fallbackResponse = await fetchUpstreamSubscription(clashUrl);
+    const fallbackHeader = (fallbackResponse.headers.get("subscription-userinfo") || "").trim();
+
+    if (fallbackResponse.body && typeof fallbackResponse.body.cancel === "function") {
+      fallbackResponse.body.cancel().catch(() => undefined);
+    }
+
+    return fallbackResponse.ok ? fallbackHeader : "";
+  } catch (error) {
+    return "";
+  }
 }
 
 function parseCookies(request) {
@@ -765,9 +997,18 @@ async function proxySubscription(response, request, type, url) {
       headers[normalizedKey] = value;
     }
   });
+  if (!headers["subscription-userinfo"]) {
+    const fallbackUserInfoHeader = await fetchFallbackSubscriptionUserInfoHeader(
+      latest?.clientUrls,
+      type,
+    );
+    if (fallbackUserInfoHeader) {
+      headers["subscription-userinfo"] = fallbackUserInfoHeader;
+    }
+  }
   headers["profile-update-interval"] = profileUpdateIntervalHours;
 
-  const body = Buffer.from(await upstreamResponse.arrayBuffer());
+  const body = sanitizeSubscriptionBody(Buffer.from(await upstreamResponse.arrayBuffer()));
   response.writeHead(200, headers);
 
   if (request.method === "HEAD") {
