@@ -364,6 +364,7 @@ small {
 .workspace-upstreams {
   grid-template-columns: 1fr;
   grid-template-rows: auto minmax(0, 1fr);
+  overflow: auto;
 }
 
 .workspace-system {
@@ -389,9 +390,122 @@ small {
   padding: 16px;
 }
 
+.upstream-cloud-form {
+  display: grid;
+  gap: 10px;
+}
+
+.upstream-cloud-bar {
+  display: grid;
+  grid-template-columns: minmax(180px, auto) auto 1fr auto;
+  gap: 10px 14px;
+  align-items: center;
+}
+
+.upstream-cloud-heading {
+  min-width: 0;
+}
+
+.upstream-cloud-heading strong {
+  display: block;
+  font-size: 1rem;
+}
+
+.upstream-cloud-heading .form-hint {
+  margin: 4px 0 0;
+  font-size: 0.82rem;
+}
+
+.upstream-cloud-switches {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+}
+
+.upstream-cloud-toggle {
+  display: inline-flex !important;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+}
+
+.upstream-cloud-toggle input {
+  width: 18px;
+  height: 18px;
+  margin: 0;
+}
+
+.upstream-cloud-toggle span {
+  font-size: 0.88rem;
+  color: var(--muted);
+}
+
+.upstream-cloud-pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  min-width: 0;
+}
+
+.upstream-cloud-pill {
+  min-width: 120px;
+  padding: 9px 12px;
+  border-radius: 14px;
+  border: 1px solid rgba(160, 177, 197, 0.09);
+  background: var(--panel-soft);
+}
+
+.upstream-cloud-pill span {
+  display: block;
+  font-size: 0.76rem;
+  color: var(--muted);
+}
+
+.upstream-cloud-pill strong {
+  display: block;
+  margin-top: 4px;
+  line-height: 1.35;
+  word-break: break-word;
+}
+
+.upstream-cloud-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
+.upstream-cloud-advanced {
+  border-top: 1px solid rgba(160, 177, 197, 0.1);
+  padding-top: 10px;
+}
+
+.upstream-cloud-advanced summary {
+  cursor: pointer;
+  color: var(--muted);
+  font-size: 0.86rem;
+  list-style: none;
+}
+
+.upstream-cloud-advanced summary::-webkit-details-marker {
+  display: none;
+}
+
+.upstream-cloud-advanced[open] summary {
+  color: var(--text);
+}
+
+.upstream-cloud-fields {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  margin-top: 10px;
+}
+
 .upstream-content-grid {
   min-height: 0;
-  height: 100%;
   display: grid;
   grid-template-columns: 300px minmax(0, 1fr);
   gap: 10px;
@@ -892,10 +1006,20 @@ code {
     grid-template-columns: 1fr;
   }
 
+  .upstream-cloud-bar {
+    grid-template-columns: 1fr;
+    align-items: start;
+  }
+
+  .upstream-cloud-actions {
+    justify-content: flex-start;
+  }
+
   .compact-switcher,
   .form-grid,
   .mode-boxes,
   .mini-status-grid,
+  .upstream-cloud-fields,
   .provider-settings,
   .links-grid,
   .meta-grid,
