@@ -91,6 +91,10 @@ function loadModules() {
       }
 
       const modulePath = path.join(dir, entry.name);
+      const moduleEntryFile = path.join(modulePath, "index.js");
+      if (!fs.existsSync(moduleEntryFile)) {
+        return;
+      }
 
       try {
         const candidate = validateModule(require(modulePath));

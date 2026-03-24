@@ -17,6 +17,7 @@ const {
   getActiveUpstreamRuntime,
   getDisplayOrigin,
   getRelayToken,
+  getUpstreamConfig,
   getUpstreamCloudConfig,
   isDefaultPasswordActive,
   listRelayUsers,
@@ -42,7 +43,11 @@ const {
   listUserStates,
   loadRelayState,
 } = require("./registrationStore");
-const { listUpstreamModuleDiagnostics, reloadUpstreamModules } = require("./upstreams/core/registry");
+const {
+  getUpstreamModule,
+  listUpstreamModuleDiagnostics,
+  reloadUpstreamModules,
+} = require("./upstreams/core/registry");
 const { mergeSubscriptionBodies } = require("./subscriptionMerger");
 const { URL_TYPES } = require("./upstreams/shared/snailApi");
 const {
@@ -1070,7 +1075,7 @@ async function fetchResolvedSubscriptionSource(source, type, requestMethod = "GE
     return {
       headers: {
         "content-type": "text/plain; charset=utf-8",
-        "profile-title": `Snail Mock ${type}`,
+        "profile-title": `RelayHub Mock ${type}`,
         "profile-update-interval": profileUpdateIntervalHours,
       },
       body:
@@ -1332,6 +1337,80 @@ async function handleUpdateSettings(request, response) {
     upstreamCloud: result.upstreamCloud,
     updatedAt: result.updatedAt,
     upstreamConfig: result.upstreamConfig,
+  });
+}
+
+async function handleTestUpstream(request, response) {
+  const body = await readJsonBody(request);
+  const upstreamId = (body.upstreamId || "").toString().trim();
+  if (!upstreamId) {
+    sendJson(response, 400, {
+      success: false,
+      error: "Upstream is required.",
+    });
+    return;
+  }
+
+  const module = getUpstreamModule(upstreamId);
+  if (!module) {
+    sendJson(response, 404, {
+      success: false,
+      error: "Upstream not found.",
+    });
+    return;
+  }
+
+  const currentConfig = (await getUpstreamConfig(upstreamId)) || module.normalizeSettings({});
+  const testConfig = module.applySettingsPatch(currentConfig, {
+    name: body.name,
+    remark: body.remark,
+    enabled: body.enabled,
+    inviteCode: body.inviteCode,
+    runtimeMode: body.runtimeMode,
+    trafficThresholdPercent: body.trafficThresholdPercent,
+    maxRegistrationAgeMinutes: body.maxRegistrationAgeMinutes,
+    subscriptionUpdateIntervalMinutes: body.subscriptionUpdateIntervalMinutes,
+    providerSettings: body.providerSettings,
+  });
+
+  const record = await module.register({
+    inviteCode: (body.inviteCode || testConfig.inviteCode || "").toString().trim(),
+    upstreamConfig: testConfig,
+    verbose: false,
+    logger: console,
+  });
+
+  let usage = null;
+  let queryError = "";
+  if (module.manifest?.capabilities?.supportsStatusQuery !== false) {
+    try {
+      usage = await module.query({
+        record,
+        upstreamConfig: testConfig,
+        verbose: false,
+        logger: console,
+      });
+    } catch (error) {
+      queryError = error.message;
+    }
+  }
+
+  sendJson(response, 200, {
+    success: true,
+    message: queryError
+      ? `Upstream registration succeeded, but status query failed: ${queryError}`
+      : "Upstream test succeeded.",
+    test: {
+      upstreamId,
+      label: testConfig.name || module.manifest.label || upstreamId,
+      supportedTypes: Array.isArray(module.manifest.supportedTypes) ? module.manifest.supportedTypes : [],
+      registration: {
+        email: record.email || "",
+        upstreamSite: record.upstreamSite || "",
+      },
+      queryVerified: Boolean(usage),
+      queryError,
+    },
   });
 }
 
@@ -1647,7 +1726,7 @@ async function proxySubscription(response, request, type, url) {
         type,
         successfulFetches[0]?.payload?.headers?.["content-type"] || "text/plain; charset=utf-8",
       ),
-      "profile-title": `Snail Aggregate ${type}`,
+      "profile-title": `RelayHub Aggregate ${type}`,
       "profile-update-interval": mergedIntervalHours,
     };
     const mergedUserInfo = mergeSubscriptionUserInfoHeaders(
@@ -1733,7 +1812,7 @@ async function proxySubscription(response, request, type, url) {
             `createdAt=${latest.createdAt || ""}`,
           ].join("\n"),
           {
-            "profile-title": `Snail Mock ${type}`,
+            "profile-title": `RelayHub Mock ${type}`,
             "profile-update-interval": profileUpdateIntervalHours,
           },
         );
@@ -1918,6 +1997,11 @@ async function requestListener(request, response) {
 
       if (request.method === "POST" && url.pathname === "/api/upstreams/reload") {
         await handleReloadUpstreams(response);
+        return;
+      }
+
+      if (request.method === "POST" && url.pathname === "/api/upstreams/test") {
+        await handleTestUpstream(request, response);
         return;
       }
 

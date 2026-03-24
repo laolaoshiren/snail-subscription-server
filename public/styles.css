@@ -387,11 +387,7 @@ small {
 }
 
 .upstream-cloud-panel {
-  padding: 16px;
-}
-
-.aggregate-panel {
-  padding: 16px;
+  padding: 12px 16px;
 }
 
 .upstream-cloud-form {
@@ -406,7 +402,7 @@ small {
 
 .aggregate-list {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
   gap: 10px;
 }
 
@@ -421,8 +417,21 @@ small {
   background: var(--panel-soft);
 }
 
+.aggregate-item__main,
 .aggregate-item__copy {
   min-width: 0;
+}
+
+.aggregate-item__toggle {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.aggregate-item__toggle input {
+  width: 18px;
+  height: 18px;
+  margin: 0;
 }
 
 .aggregate-item__copy strong,
@@ -442,8 +451,8 @@ small {
 
 .upstream-cloud-bar {
   display: grid;
-  grid-template-columns: minmax(180px, auto) auto 1fr auto;
-  gap: 10px 14px;
+  grid-template-columns: minmax(140px, auto) auto 1fr auto;
+  gap: 8px 12px;
   align-items: center;
 }
 
@@ -457,8 +466,8 @@ small {
 }
 
 .upstream-cloud-heading .form-hint {
-  margin: 4px 0 0;
-  font-size: 0.82rem;
+  margin: 2px 0 0;
+  font-size: 0.78rem;
 }
 
 .upstream-cloud-switches {
@@ -495,8 +504,8 @@ small {
 }
 
 .upstream-cloud-pill {
-  min-width: 120px;
-  padding: 9px 12px;
+  min-width: 110px;
+  padding: 8px 10px;
   border-radius: 14px;
   border: 1px solid rgba(160, 177, 197, 0.09);
   background: var(--panel-soft);
@@ -552,8 +561,14 @@ small {
 .upstream-content-grid {
   min-height: 0;
   display: grid;
-  grid-template-columns: 300px minmax(0, 1fr);
+  grid-template-columns: 290px minmax(0, 1fr);
   gap: 10px;
+}
+
+.detail-view {
+  display: grid;
+  align-content: start;
+  gap: 12px;
 }
 
 .compact-head p {
@@ -841,6 +856,10 @@ textarea {
   transition: transform 140ms ease, border-color 140ms ease, opacity 140ms ease;
 }
 
+.upstream-list-item--mode {
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+
 .upstream-list-item:hover {
   transform: translateY(-1px);
 }
@@ -883,6 +902,15 @@ textarea {
 .upstream-list-item__body small,
 .upstream-list-item__drag {
   color: var(--muted);
+}
+
+.upstream-list-item__badge {
+  padding: 5px 10px;
+  border-radius: 999px;
+  background: rgba(245, 158, 11, 0.14);
+  color: #f8c25c;
+  font-size: 0.76rem;
+  white-space: nowrap;
 }
 
 .upstream-detail-summary {
@@ -959,6 +987,10 @@ textarea {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 12px;
+}
+
+.upstream-form-actions {
+  justify-content: flex-start;
 }
 
 .tool-block,

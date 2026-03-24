@@ -19,8 +19,11 @@ const upstreamCloudForm = document.querySelector("#upstreamCloudForm");
 const checkUpstreamCloudButton = document.querySelector("#checkUpstreamCloudButton");
 const syncUpstreamCloudButton = document.querySelector("#syncUpstreamCloudButton");
 const saveUpstreamCloudButton = document.querySelector("#saveUpstreamCloudButton");
+const upstreamDetailView = document.querySelector("#upstreamDetailView");
+const aggregateDetailView = document.querySelector("#aggregateDetailView");
 const aggregateForm = document.querySelector("#aggregateForm");
 const aggregateList = document.querySelector("#aggregateList");
+const aggregateSummary = document.querySelector("#aggregateSummary");
 const saveAggregateButton = document.querySelector("#saveAggregateButton");
 
 const statusBar = document.querySelector("#statusBar");
@@ -92,9 +95,11 @@ const appUpdateSummary = document.querySelector("#appUpdateSummary");
 
 const loginButton = document.querySelector("#loginButton");
 const registerButton = document.querySelector("#registerButton");
+const testUpstreamButton = document.querySelector("#testUpstreamButton");
 const saveUpstreamButton = document.querySelector("#saveUpstreamButton");
 const saveSystemButton = document.querySelector("#saveSystemButton");
 const savePasswordButton = document.querySelector("#savePasswordButton");
+const AGGREGATE_CONFIG_VALUE = "__aggregate_config__";
 const POLLING_UPSTREAM_VALUE = "__polling__";
 const AGGREGATE_UPSTREAM_VALUE = "__aggregate__";
 const ACTIVE_UPSTREAM_MODES = {
@@ -295,9 +300,9 @@ async function storeBrowserCredential() {
 
   try {
     const credential = new PasswordCredential({
-      id: (loginUsername?.value || "snail-panel").trim() || "snail-panel",
+      id: (loginUsername?.value || "relayhub-panel").trim() || "relayhub-panel",
       password,
-      name: "Snail Panel",
+      name: "RelayHub Panel",
     });
     await navigator.credentials.store(credential);
   } catch (error) {
@@ -410,8 +415,8 @@ async function openQrModal(label, url) {
 function createFallbackUpstream(upstreamId = state.activeUpstreamId || state.selectedUpstreamId) {
   return {
     id: upstreamId,
-    label: "主上游",
-    moduleLabel: "snail-default",
+    label: "默认上游",
+    moduleLabel: "default",
     description: "",
     capabilities: {
       supportsStatusQuery: true,
@@ -422,7 +427,7 @@ function createFallbackUpstream(upstreamId = state.activeUpstreamId || state.sel
     active: true,
     config: {
       enabled: true,
-      name: "主上游",
+      name: "默认上游",
       remark: "",
       runtimeMode: "always_refresh",
       trafficThresholdPercent: 20,
@@ -470,11 +475,19 @@ function getActiveUpstream() {
 }
 
 function getSelectedUpstream() {
+  if (state.selectedUpstreamId === AGGREGATE_CONFIG_VALUE) {
+    return null;
+  }
+
   return (
     getOrderedUpstreams().find((item) => item.id === state.selectedUpstreamId) ||
     getActiveUpstream() ||
     createFallbackUpstream(state.selectedUpstreamId)
   );
+}
+
+function isAggregateConfigSelected() {
+  return state.selectedUpstreamId === AGGREGATE_CONFIG_VALUE;
 }
 
 function isPollingMode() {
@@ -490,7 +503,16 @@ function getAggregateCopies(upstreamId) {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
 }
 
-function getAggregateSelectionLabel() {
+function normalizeAggregateCopies(value, fallback = 0) {
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    return fallback;
+  }
+
+  return Math.min(parsed, 10);
+}
+
+function getAggregateSelectionLabel(counts = state.upstreamAggregation?.counts || {}) {
   const labels = [];
 
   getOrderedUpstreams().forEach((upstream) => {
@@ -498,7 +520,7 @@ function getAggregateSelectionLabel() {
       return;
     }
 
-    const copies = getAggregateCopies(upstream.id);
+    const copies = normalizeAggregateCopies(counts[upstream.id], 0);
     if (copies <= 0) {
       return;
     }
@@ -507,6 +529,27 @@ function getAggregateSelectionLabel() {
   });
 
   return labels.join(" + ");
+}
+
+function collectAggregateCountsFromForm() {
+  const counts = {};
+
+  Array.from(aggregateList?.querySelectorAll("[data-aggregate-upstream-id]") || []).forEach((input) => {
+    const upstreamId = input.dataset.aggregateUpstreamId || "";
+    const row = input.closest(".aggregate-item");
+    const checkbox = row?.querySelector("[data-aggregate-enabled]");
+    counts[upstreamId] = checkbox?.checked ? Math.max(1, normalizeAggregateCopies(input.value, 1)) : 0;
+  });
+
+  return counts;
+}
+
+function renderAggregateSummary(counts = collectAggregateCountsFromForm()) {
+  if (!aggregateSummary) {
+    return;
+  }
+
+  setText(aggregateSummary, getAggregateSelectionLabel(counts) || "未选择上游");
 }
 
 function getRuntimeSelectionLabel(upstream = getActiveUpstream()) {
@@ -603,7 +646,7 @@ function describeMode(upstream) {
   const config = upstream?.config || {};
   const updateIntervalText = `${config.subscriptionUpdateIntervalMinutes ?? 30} 分钟自动更新`;
   if (!upstreamSupportsStatusQuery(upstream)) {
-    return `仅兼容模式，${updateIntervalText}。`;
+    return `兼容模式，每次拉取重注。${updateIntervalText}。`;
   }
 
   if (config.runtimeMode === "smart_usage") {
@@ -611,18 +654,18 @@ function describeMode(upstream) {
       Number(config.maxRegistrationAgeMinutes) > 0
         ? `，或账号年龄超过 ${config.maxRegistrationAgeMinutes} 分钟`
         : "";
-    return `智能模式：低于 ${config.trafficThresholdPercent}%${ageRule} 时重注，${updateIntervalText}。`;
+    return `智能模式，低于 ${config.trafficThresholdPercent}%${ageRule} 时重注。${updateIntervalText}。`;
   }
 
-  return `兼容模式：每次拉取都重注，${updateIntervalText}。`;
+  return `兼容模式，每次拉取重注。${updateIntervalText}。`;
 }
 
 function describeRuntimeSelection(upstream = getActiveUpstream()) {
   if (isAggregateMode()) {
     const selectionLabel = getAggregateSelectionLabel();
     return selectionLabel
-      ? `聚合模式：${selectionLabel}。`
-      : "聚合模式：暂无可用聚合上游。";
+      ? `聚合模式：${selectionLabel}`
+      : "聚合模式：未选择上游";
   }
 
   if (!isPollingMode()) {
@@ -636,7 +679,7 @@ function describeRuntimeSelection(upstream = getActiveUpstream()) {
     return "轮询模式：暂无可用上游。";
   }
 
-  return `轮询模式：按顺序尝试。${enabledNames.join(" → ")}`;
+  return `轮询模式：${enabledNames.join(" → ")}`;
 }
 
 function selectUpstreamConfig(upstreamId) {
@@ -655,6 +698,7 @@ async function persistUpstreamOrder(nextOrder) {
   renderUpstreamSwitcher();
   renderUpstreamList();
   renderAggregateEditor();
+  renderAggregateSummary();
 
   try {
     await requestJson("/api/settings", {
@@ -668,6 +712,7 @@ async function persistUpstreamOrder(nextOrder) {
     renderUpstreamSwitcher();
     renderUpstreamList();
     renderAggregateEditor();
+    renderAggregateSummary();
     syncUpstreamForm();
     setStatus(error.message, "error");
   }
@@ -679,6 +724,22 @@ function renderUpstreamList() {
   }
 
   upstreamList.innerHTML = "";
+
+  const aggregateItem = document.createElement("button");
+  aggregateItem.type = "button";
+  aggregateItem.className = `upstream-list-item upstream-list-item--mode${isAggregateConfigSelected() ? " active" : ""}`;
+  aggregateItem.dataset.upstreamId = AGGREGATE_CONFIG_VALUE;
+  aggregateItem.innerHTML = `
+    <span class="upstream-list-item__body">
+      <strong>聚合模式</strong>
+      <small>${getAggregateSelectionLabel() || "点击配置聚合上游"}</small>
+    </span>
+    <span class="upstream-list-item__badge">${isAggregateMode() ? "运行中" : "配置"}</span>
+  `;
+  aggregateItem.addEventListener("click", () => {
+    selectUpstreamConfig(AGGREGATE_CONFIG_VALUE);
+  });
+  upstreamList.appendChild(aggregateItem);
 
   getOrderedUpstreams().forEach((upstream, index) => {
     const item = document.createElement("button");
@@ -756,26 +817,61 @@ function renderAggregateEditor() {
   aggregateList.innerHTML = "";
 
   getOrderedUpstreams().forEach((upstream) => {
+    const copies = getAggregateCopies(upstream.id);
+    const enabled = upstream.config?.enabled !== false;
     const row = document.createElement("label");
     row.className = "aggregate-item";
     row.innerHTML = `
-      <span class="aggregate-item__copy">
-        <strong>${upstream.label || upstream.id}</strong>
-        <small>${upstream.config?.enabled === false ? "已停用" : "按排序参与聚合"}</small>
+      <span class="aggregate-item__main">
+        <span class="aggregate-item__toggle">
+          <input
+            type="checkbox"
+            data-aggregate-enabled="${upstream.id}"
+            ${copies > 0 ? "checked" : ""}
+            ${enabled ? "" : "disabled"}
+          />
+          <span class="aggregate-item__copy">
+            <strong>${upstream.label || upstream.id}</strong>
+            <small>${enabled ? upstream.id : "已停用"}</small>
+          </span>
+        </span>
       </span>
       <input
         class="aggregate-item__input"
         type="number"
-        min="0"
+        min="1"
         max="10"
         step="1"
-        value="${getAggregateCopies(upstream.id)}"
+        value="${copies > 0 ? copies : 1}"
         data-aggregate-upstream-id="${upstream.id}"
-        ${upstream.config?.enabled === false ? "disabled" : ""}
+        ${!enabled || copies <= 0 ? "disabled" : ""}
       />
     `;
+
+    const checkbox = row.querySelector("[data-aggregate-enabled]");
+    const input = row.querySelector("[data-aggregate-upstream-id]");
+    const syncRow = () => {
+      if (!checkbox || !input) {
+        return;
+      }
+
+      input.disabled = !checkbox.checked || !enabled;
+      if (checkbox.checked) {
+        input.value = String(Math.max(1, normalizeAggregateCopies(input.value, 1)));
+      }
+      renderAggregateSummary();
+    };
+
+    checkbox?.addEventListener("change", syncRow);
+    input?.addEventListener("input", () => {
+      input.value = String(Math.max(1, normalizeAggregateCopies(input.value, 1)));
+      renderAggregateSummary();
+    });
+
     aggregateList.appendChild(row);
   });
+
+  renderAggregateSummary();
 }
 
 function fillMeta(registration) {
@@ -993,22 +1089,17 @@ function renderHistory(history) {
 function renderUpstreamOverview(upstream) {
   const config = upstream?.config || {};
   const capabilitySummary = [];
-  if (!upstreamSupportsStatusQuery(upstream)) {
-    capabilitySummary.push("仅兼容模式");
-  }
-  if (!upstreamSupportsInviteCode(upstream)) {
-    capabilitySummary.push("不支持邀请码");
-  }
-  if (Array.isArray(upstream?.supportedTypes) && upstream.supportedTypes.length > 0) {
-    capabilitySummary.push(`支持 ${upstream.supportedTypes.join(", ")}`);
-  }
-  setText(upstreamOverviewName, upstream?.label || "主上游");
-  setText(upstreamOverviewModule, upstream?.id || "snail-default");
-  setText(upstreamOverviewStatus, config.enabled === false ? "已停用" : "启用中");
-  setText(upstreamOverviewRemark, config.remark || upstream?.remark || "暂无备注");
+  capabilitySummary.push(upstreamSupportsStatusQuery(upstream) ? "可查状态" : "仅注册");
+  capabilitySummary.push(upstreamSupportsInviteCode(upstream) ? "支持邀请码" : "无需邀请码");
+  capabilitySummary.push(`${getSupportedProtocolTypes(upstream).length} 种订阅`);
+  setText(upstreamOverviewName, upstream?.label || "默认上游");
+  setText(upstreamOverviewModule, upstream?.id || "default");
+  setText(upstreamOverviewStatus, config.enabled === false ? "已停用" : "参与中");
   setText(
     upstreamOverviewDescription,
-    [upstream?.description || "暂无说明", capabilitySummary.join(" · ")].filter(Boolean).join(" · "),
+    [upstream?.description || "暂无说明", config.remark || upstream?.remark || "", capabilitySummary.join(" · ")]
+      .filter(Boolean)
+      .join(" · "),
   );
 }
 
@@ -1135,13 +1226,29 @@ function renderProviderSettingsFields(upstream) {
 function syncUpstreamForm() {
   const runtimeUpstream = getActiveUpstream();
   const selectedUpstream = getSelectedUpstream();
-  const config = selectedUpstream.config || {};
-  const supportsStatusQuery = upstreamSupportsStatusQuery(selectedUpstream);
-  const supportsInviteCode = upstreamSupportsInviteCode(selectedUpstream);
   const runtimeSupportsInviteCode = upstreamSupportsInviteCode(runtimeUpstream);
 
   setText(activeUpstreamLabel, getRuntimeSelectionLabel(runtimeUpstream));
   setText(modeDescription, describeRuntimeSelection(runtimeUpstream));
+
+  if (isAggregateConfigSelected()) {
+    toggleHidden(aggregateDetailView, false);
+    toggleHidden(upstreamDetailView, true);
+    renderAggregateEditor();
+    renderAggregateSummary();
+    return;
+  }
+
+  toggleHidden(aggregateDetailView, true);
+  toggleHidden(upstreamDetailView, false);
+
+  if (!selectedUpstream) {
+    return;
+  }
+
+  const config = selectedUpstream?.config || {};
+  const supportsStatusQuery = upstreamSupportsStatusQuery(selectedUpstream);
+  const supportsInviteCode = upstreamSupportsInviteCode(selectedUpstream);
   renderUpstreamOverview(selectedUpstream);
 
   setInputValue(upstreamNameInput, config.name || selectedUpstream.label || "");
@@ -1181,6 +1288,10 @@ function syncUpstreamForm() {
   }
   if (maxRegistrationAgeInput) {
     maxRegistrationAgeInput.disabled = !supportsStatusQuery;
+  }
+
+  if (testUpstreamButton) {
+    testUpstreamButton.disabled = false;
   }
 
   renderProviderSettingsFields(selectedUpstream);
@@ -1308,6 +1419,39 @@ function announceAvailableUpdate() {
   }
 }
 
+function collectUpstreamFormPayload(upstream) {
+  const formData = new FormData(upstreamForm);
+  const providerSettings = {};
+
+  Array.from(upstream?.settingFields || []).forEach((field) => {
+    const element = providerSettingsFields?.querySelector(`[data-provider-key="${field.key}"]`);
+    const container = element?.closest(".provider-field");
+    if (!container) {
+      return;
+    }
+
+    providerSettings[field.key] = getProviderFieldValue(field, container);
+  });
+
+  return {
+    upstreamId: upstream?.id || state.selectedUpstreamId,
+    name: (formData.get("name") || "").toString().trim(),
+    remark: (formData.get("remark") || "").toString().trim(),
+    enabled: upstreamEnabledInput?.checked,
+    inviteCode: upstreamSupportsInviteCode(upstream)
+      ? (formData.get("inviteCode") || "").toString().trim()
+      : "",
+    runtimeMode: (formData.get("runtimeMode") || "").toString(),
+    trafficThresholdPercent: Number.parseInt(formData.get("trafficThresholdPercent"), 10),
+    maxRegistrationAgeMinutes: Number.parseInt(formData.get("maxRegistrationAgeMinutes"), 10),
+    subscriptionUpdateIntervalMinutes: Number.parseInt(
+      formData.get("subscriptionUpdateIntervalMinutes"),
+      10,
+    ),
+    providerSettings,
+  };
+}
+
 function updateSummaryFromPayload(payload) {
   const currentUser = getCurrentUser();
   const nextSummary = {
@@ -1406,6 +1550,11 @@ async function switchActiveUpstream(upstreamId) {
     });
 
     await refreshSession();
+    if (upstreamId === AGGREGATE_UPSTREAM_VALUE) {
+      state.selectedUpstreamId = AGGREGATE_CONFIG_VALUE;
+      renderUpstreamList();
+      syncUpstreamForm();
+    }
     setStatus(
       isAggregateMode()
         ? `已切换到聚合模式。当前配置：${getAggregateSelectionLabel() || "未选择上游"}。`
@@ -1434,12 +1583,12 @@ function renderUpstreamSwitcher() {
 
   const aggregateOption = document.createElement("option");
   aggregateOption.value = AGGREGATE_UPSTREAM_VALUE;
-  aggregateOption.textContent = "聚合模式 · 合并多个上游节点";
+  aggregateOption.textContent = "聚合模式 · 多源合并";
   upstreamSwitcher.appendChild(aggregateOption);
 
   const pollingOption = document.createElement("option");
   pollingOption.value = POLLING_UPSTREAM_VALUE;
-  pollingOption.textContent = "轮询模式 · 按排序顺序依次尝试";
+  pollingOption.textContent = "轮询模式 · 顺序回退";
   upstreamSwitcher.appendChild(pollingOption);
 
   getOrderedUpstreams().forEach((upstream) => {
@@ -1480,14 +1629,20 @@ function applySession(payload) {
   if (!state.users.some((user) => user.key === state.currentUserKey)) {
     state.currentUserKey = payload.defaultUserKey || state.users[0]?.key || "userA";
   }
-  if (!getOrderedUpstreams().some((upstream) => upstream.id === state.selectedUpstreamId)) {
-    state.selectedUpstreamId = state.activeUpstreamId || getOrderedUpstreams()[0]?.id || "";
+  if (
+    state.selectedUpstreamId !== AGGREGATE_CONFIG_VALUE &&
+    !getOrderedUpstreams().some((upstream) => upstream.id === state.selectedUpstreamId)
+  ) {
+    state.selectedUpstreamId = isAggregateMode()
+      ? AGGREGATE_CONFIG_VALUE
+      : state.activeUpstreamId || getOrderedUpstreams()[0]?.id || AGGREGATE_CONFIG_VALUE;
   }
 
   setText(activeUserLabel, getCurrentUser().label);
   renderUpstreamSwitcher();
   renderUpstreamList();
   renderAggregateEditor();
+  renderAggregateSummary();
   renderUserSwitcher();
   syncUpstreamForm();
   syncRegisterForm();
@@ -1722,43 +1877,20 @@ if (upstreamForm) {
     clearStatus();
     setLoading(saveUpstreamButton, "保存中...", true);
 
-    const formData = new FormData(upstreamForm);
     const upstream = getSelectedUpstream();
-    const providerSettings = {};
-    Array.from(upstream?.settingFields || []).forEach((field) => {
-      const element = providerSettingsFields?.querySelector(`[data-provider-key="${field.key}"]`);
-      const container = element?.closest(".provider-field");
-      if (!container) {
-        return;
-      }
-
-      providerSettings[field.key] = getProviderFieldValue(field, container);
-    });
+    if (!upstream) {
+      setLoading(saveUpstreamButton, "保存中...", false);
+      return;
+    }
 
     try {
       await requestJson("/api/settings", {
         method: "POST",
-        body: JSON.stringify({
-          upstreamId: state.selectedUpstreamId,
-          name: (formData.get("name") || "").toString().trim(),
-          remark: (formData.get("remark") || "").toString().trim(),
-          enabled: upstreamEnabledInput?.checked,
-          inviteCode: upstreamSupportsInviteCode(upstream)
-            ? (formData.get("inviteCode") || "").toString().trim()
-            : "",
-          runtimeMode: (formData.get("runtimeMode") || "").toString(),
-          trafficThresholdPercent: Number.parseInt(formData.get("trafficThresholdPercent"), 10),
-          maxRegistrationAgeMinutes: Number.parseInt(formData.get("maxRegistrationAgeMinutes"), 10),
-          subscriptionUpdateIntervalMinutes: Number.parseInt(
-            formData.get("subscriptionUpdateIntervalMinutes"),
-            10,
-          ),
-          providerSettings,
-        }),
+        body: JSON.stringify(collectUpstreamFormPayload(upstream)),
       });
 
       await refreshSession();
-      setStatus("当前上游配置已更新。", "success");
+      setStatus("上游配置已更新。", "success");
     } catch (error) {
       if (error.status === 401) {
         showLogin();
@@ -1769,6 +1901,44 @@ if (upstreamForm) {
       setStatus(error.message, "error");
     } finally {
       setLoading(saveUpstreamButton, "保存中...", false);
+    }
+  });
+}
+
+if (testUpstreamButton) {
+  testUpstreamButton.addEventListener("click", async () => {
+    clearStatus();
+    setLoading(testUpstreamButton, "测试中...", true);
+
+    const upstream = getSelectedUpstream();
+    if (!upstream) {
+      setLoading(testUpstreamButton, "测试中...", false);
+      return;
+    }
+
+    try {
+      const payload = await requestJson("/api/upstreams/test", {
+        method: "POST",
+        body: JSON.stringify(collectUpstreamFormPayload(upstream)),
+      });
+
+      const typeCount = Array.isArray(payload.test?.supportedTypes) ? payload.test.supportedTypes.length : 0;
+      const summary = payload.test?.queryVerified
+        ? `测试通过：已完成注册并验证状态，支持 ${typeCount} 种订阅。`
+        : payload.test?.queryError
+          ? `注册可用，但状态查询失败：${payload.test.queryError}`
+          : `测试通过：已完成注册，支持 ${typeCount} 种订阅。`;
+      setStatus(summary, payload.test?.queryError ? "warning" : "success");
+    } catch (error) {
+      if (error.status === 401) {
+        showLogin();
+        setStatus("登录状态已失效，请重新输入密码。", "error");
+        return;
+      }
+
+      setStatus(error.message, "error");
+    } finally {
+      setLoading(testUpstreamButton, "测试中...", false);
     }
   });
 }
@@ -1850,12 +2020,7 @@ if (aggregateForm) {
     clearStatus();
     setLoading(saveAggregateButton, "保存中...", true);
 
-    const counts = {};
-    Array.from(aggregateList?.querySelectorAll("[data-aggregate-upstream-id]") || []).forEach((input) => {
-      const upstreamId = input.dataset.aggregateUpstreamId || "";
-      const parsed = Number.parseInt(input.value || "0", 10);
-      counts[upstreamId] = Number.isFinite(parsed) && parsed > 0 ? Math.min(parsed, 10) : 0;
-    });
+    const counts = collectAggregateCountsFromForm();
 
     try {
       await requestJson("/api/settings", {

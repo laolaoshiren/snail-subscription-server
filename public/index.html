@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Snail 中转订阅面板</title>
+    <title>RelayHub 聚合订阅系统</title>
     <link rel="stylesheet" href="/styles.css?v=__ASSET_VERSION__" />
     <script defer src="/app.js?v=__ASSET_VERSION__"></script>
   </head>
@@ -13,8 +13,8 @@
         <section id="loginView" class="auth-view">
           <div class="auth-brand">
             <p class="eyebrow">Relay Console</p>
-            <h1>Snail 中转订阅面板</h1>
-            <p>统一管理中转订阅与上游配置。</p>
+            <h1>RelayHub 聚合订阅系统</h1>
+            <p>统一管理订阅中转、聚合和上游配置。</p>
           </div>
 
           <section class="panel auth-card">
@@ -30,7 +30,7 @@
                   id="loginUsername"
                   name="username"
                   type="text"
-                  value="snail-panel"
+                  value="relayhub-panel"
                   autocomplete="username"
                   tabindex="-1"
                 />
@@ -62,8 +62,8 @@
           <header class="dashboard-header">
             <div class="header-copy">
               <p class="eyebrow">Server Relay</p>
-              <h1>Snail 中转订阅面板</h1>
-              <p>集中管理订阅、中转和上游。</p>
+              <h1>RelayHub 聚合订阅系统</h1>
+              <p>集中管理订阅、中转、轮询和聚合。</p>
             </div>
 
             <div class="header-actions">
@@ -203,19 +203,19 @@
                 <form id="upstreamCloudForm" class="upstream-cloud-form">
                   <div class="upstream-cloud-bar">
                     <div class="upstream-cloud-heading">
-                      <strong>云端同步</strong>
-                      <p id="upstreamCloudHint" class="form-hint">保存后可手动检查或立即同步。</p>
+                      <strong>云端模块</strong>
+                      <p id="upstreamCloudHint" class="form-hint">检查并同步云端上游。</p>
                     </div>
 
                     <div class="upstream-cloud-switches">
                       <label class="upstream-cloud-toggle">
                         <input id="upstreamCloudEnabled" name="enabled" type="checkbox" />
-                        <span>启用</span>
+                        <span>云端</span>
                       </label>
 
                       <label class="upstream-cloud-toggle">
                         <input id="upstreamCloudAutoSync" name="autoSync" type="checkbox" />
-                        <span>自动同步</span>
+                        <span>自动</span>
                       </label>
                     </div>
 
@@ -225,11 +225,11 @@
                         <strong id="upstreamCloudState">未检查</strong>
                       </div>
                       <div class="upstream-cloud-pill">
-                        <span>云端版本</span>
+                        <span>版本</span>
                         <strong id="upstreamCloudLatest">暂无</strong>
                       </div>
                       <div class="upstream-cloud-pill">
-                        <span>最近同步</span>
+                        <span>最近</span>
                         <strong id="upstreamCloudSyncedAt">暂无</strong>
                       </div>
                     </div>
@@ -263,137 +263,140 @@
                 </form>
               </section>
 
-              <section class="panel aggregate-panel">
-                <form id="aggregateForm" class="aggregate-form">
-                  <div class="panel-head compact-head">
-                    <h2>节点聚合</h2>
-                    <p>填 0 表示不参与，填 2 表示这个上游同时注册两份并合并返回。</p>
-                  </div>
-
-                  <div id="aggregateList" class="aggregate-list"></div>
-
-                  <div class="inline-actions">
-                    <button id="saveAggregateButton" class="primary-button slim-button" type="submit">保存聚合配置</button>
-                  </div>
-                </form>
-              </section>
-
               <div class="upstream-content-grid">
                 <section class="panel upstream-list-panel">
                   <div class="panel-head compact-head">
-                    <h2>上游列表</h2>
-                    <p>点击查看，拖动排序。</p>
+                    <h2>调度列表</h2>
+                    <p>拖动排序，点右侧配置。</p>
                   </div>
 
                   <div id="upstreamList" class="upstream-list"></div>
                 </section>
 
                 <section class="panel upstream-form-panel">
-                  <div class="panel-head compact-head">
-                    <h2>上游详情</h2>
-                    <p>这里只编辑所选上游。</p>
-                  </div>
-
-                  <div class="overview-stack upstream-detail-summary">
-                    <div class="context-card">
-                      <span>当前详情上游</span>
-                      <strong id="upstreamOverviewName">主上游</strong>
-                    </div>
-                    <div class="context-card">
-                      <span>适配器标识</span>
-                      <strong id="upstreamOverviewModule">snail-default</strong>
-                    </div>
-                    <div class="context-card">
-                      <span>启用状态</span>
-                      <strong id="upstreamOverviewStatus">启用中</strong>
-                    </div>
-                    <div class="context-card wide">
-                      <span>备注</span>
-                      <strong id="upstreamOverviewRemark">暂无备注</strong>
-                    </div>
-                    <div class="context-card wide">
-                      <span>说明</span>
-                      <strong id="upstreamOverviewDescription">当前上游信息暂未加载。</strong>
-                    </div>
-                  </div>
-
-                  <form id="upstreamForm" class="stack-form upstream-form">
-                    <div class="form-grid">
-                      <label>
-                        <span>上游名称</span>
-                        <input id="upstreamName" name="name" type="text" placeholder="例如 主上游" />
-                      </label>
-
-                      <label>
-                        <span>上游备注</span>
-                        <input id="upstreamRemark" name="remark" type="text" placeholder="例如 生产环境 / 测试环境" />
-                      </label>
-
-                      <label class="checkbox-row">
-                        <input id="upstreamEnabled" name="enabled" type="checkbox" />
-                        <span>启用当前上游</span>
-                      </label>
-
-                      <label>
-                        <span>默认邀请码</span>
-                        <input id="upstreamInviteCode" name="inviteCode" type="text" placeholder="可选" />
-                      </label>
-
-                      <label>
-                        <span>流量阈值（%）</span>
-                        <input id="trafficThresholdPercent" name="trafficThresholdPercent" type="number" min="0" max="100" step="1" />
-                      </label>
-
-                      <label>
-                        <span>过期时间（分钟）</span>
-                        <input id="maxRegistrationAgeMinutes" name="maxRegistrationAgeMinutes" type="number" min="0" step="1" />
-                      </label>
-
-                      <label>
-                        <span>订阅自动更新时间（分钟）</span>
-                        <input
-                          id="subscriptionUpdateIntervalMinutes"
-                          name="subscriptionUpdateIntervalMinutes"
-                          type="number"
-                          min="1"
-                          step="1"
-                        />
-                      </label>
+                  <div id="aggregateDetailView" class="detail-view hidden">
+                    <div class="panel-head compact-head">
+                      <h2>聚合模式</h2>
+                      <p>勾选参与上游并设置副本数。</p>
                     </div>
 
-                    <p class="form-hint">
-                      Clash / Mihomo 客户端通过 <code>profile-update-interval</code> 响应头读取更新间隔，单位是小时；
-                      这里填写的分钟数在下发时会自动向上换算成小时，30 分钟会写成 1 小时。
-                    </p>
-
-                    <div class="mode-boxes">
-                      <label class="option-card">
-                        <input type="radio" name="runtimeMode" value="always_refresh" />
-                        <span>
-                          <strong>兼容模式</strong>
-                          <small>每次拉取都重新注册。</small>
-                        </span>
-                      </label>
-
-                      <label class="option-card">
-                        <input type="radio" name="runtimeMode" value="smart_usage" />
-                        <span>
-                          <strong>智能模式</strong>
-                          <small>按流量和时长决定是否重注。</small>
-                        </span>
-                      </label>
-                    </div>
-
-                    <div class="provider-fields-wrap">
-                      <div class="provider-title">
-                        <strong>连接参数</strong>
-                        <small>由适配器提供。</small>
+                    <form id="aggregateForm" class="stack-form aggregate-form">
+                      <div class="context-card wide aggregate-summary-card">
+                        <span>当前组合</span>
+                        <strong id="aggregateSummary">未选择上游</strong>
                       </div>
-                      <div id="providerSettingsFields" class="provider-settings"></div>
+
+                      <div id="aggregateList" class="aggregate-list"></div>
+
+                      <div class="inline-actions">
+                        <button id="saveAggregateButton" class="primary-button slim-button" type="submit">保存聚合配置</button>
+                      </div>
+                    </form>
+                  </div>
+
+                  <div id="upstreamDetailView" class="detail-view">
+                    <div class="panel-head compact-head">
+                      <h2>上游配置</h2>
+                      <p>编辑当前选项。</p>
                     </div>
 
-                    <button id="saveUpstreamButton" class="primary-button" type="submit">保存当前上游配置</button>
-                  </form>
+                    <div class="overview-stack upstream-detail-summary">
+                      <div class="context-card">
+                        <span>名称</span>
+                        <strong id="upstreamOverviewName">主上游</strong>
+                      </div>
+                      <div class="context-card">
+                        <span>模块</span>
+                        <strong id="upstreamOverviewModule">default</strong>
+                      </div>
+                      <div class="context-card">
+                        <span>状态</span>
+                        <strong id="upstreamOverviewStatus">启用中</strong>
+                      </div>
+                      <div class="context-card wide">
+                        <span>摘要</span>
+                        <strong id="upstreamOverviewDescription">当前上游信息暂未加载。</strong>
+                      </div>
+                    </div>
+
+                    <form id="upstreamForm" class="stack-form upstream-form">
+                      <div class="form-grid">
+                        <label>
+                          <span>上游名称</span>
+                          <input id="upstreamName" name="name" type="text" placeholder="例如 主上游" />
+                        </label>
+
+                        <label>
+                          <span>备注</span>
+                          <input id="upstreamRemark" name="remark" type="text" placeholder="例如 生产 / 备用" />
+                        </label>
+
+                        <label class="checkbox-row">
+                          <input id="upstreamEnabled" name="enabled" type="checkbox" />
+                          <span>参与调度</span>
+                        </label>
+
+                        <label>
+                          <span>默认邀请码</span>
+                          <input id="upstreamInviteCode" name="inviteCode" type="text" placeholder="可选" />
+                        </label>
+
+                        <label>
+                          <span>流量阈值（%）</span>
+                          <input id="trafficThresholdPercent" name="trafficThresholdPercent" type="number" min="0" max="100" step="1" />
+                        </label>
+
+                        <label>
+                          <span>重注时限（分钟）</span>
+                          <input id="maxRegistrationAgeMinutes" name="maxRegistrationAgeMinutes" type="number" min="0" step="1" />
+                        </label>
+
+                        <label>
+                          <span>订阅更新时间（分钟）</span>
+                          <input
+                            id="subscriptionUpdateIntervalMinutes"
+                            name="subscriptionUpdateIntervalMinutes"
+                            type="number"
+                            min="1"
+                            step="1"
+                          />
+                        </label>
+                      </div>
+
+                      <p class="form-hint">Clash / Mihomo 通过 <code>profile-update-interval</code> 按小时读取，30 分钟会下发成 1 小时。</p>
+
+                      <div class="mode-boxes">
+                        <label class="option-card">
+                          <input type="radio" name="runtimeMode" value="always_refresh" />
+                          <span>
+                            <strong>兼容模式</strong>
+                            <small>每次拉取都重注。</small>
+                          </span>
+                        </label>
+
+                        <label class="option-card">
+                          <input type="radio" name="runtimeMode" value="smart_usage" />
+                          <span>
+                            <strong>智能模式</strong>
+                            <small>按流量和时长决定是否重注。</small>
+                          </span>
+                        </label>
+                      </div>
+
+                      <div class="provider-fields-wrap">
+                        <div class="provider-title">
+                          <strong>连接参数</strong>
+                          <small>当前模块提供。</small>
+                        </div>
+                        <div id="providerSettingsFields" class="provider-settings"></div>
+                      </div>
+
+                      <div class="inline-actions upstream-form-actions">
+                        <button id="testUpstreamButton" class="ghost-button slim-button" type="button">测试可用性</button>
+                        <button id="saveUpstreamButton" class="primary-button slim-button" type="submit">保存配置</button>
+                      </div>
+                    </form>
+                  </div>
                 </section>
               </div>
 
