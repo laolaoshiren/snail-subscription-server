@@ -24,6 +24,7 @@ const userScopePanel = document.querySelector("#userScopePanel");
 
 const userSwitcher = document.querySelector("#userSwitcher");
 const upstreamSwitcher = document.querySelector("#upstreamSwitcher");
+const upstreamList = document.querySelector("#upstreamList");
 const usageGrid = document.querySelector("#usageGrid");
 const usageEmptyState = document.querySelector("#usageEmptyState");
 const historyList = document.querySelector("#historyList");
@@ -63,6 +64,11 @@ const registerButton = document.querySelector("#registerButton");
 const saveUpstreamButton = document.querySelector("#saveUpstreamButton");
 const saveSystemButton = document.querySelector("#saveSystemButton");
 const savePasswordButton = document.querySelector("#savePasswordButton");
+const POLLING_UPSTREAM_VALUE = "__polling__";
+const ACTIVE_UPSTREAM_MODES = {
+  SINGLE: "single",
+  POLLING: "polling",
+};
 
 const protocolLabels = {
   universal: "通用订阅",
@@ -77,12 +83,16 @@ const state = {
   displayOrigin: "",
   users: [],
   upstreams: [],
+  upstreamOrder: [],
   relayUrlsByUser: {},
   userSummaries: [],
   currentUserKey: "userA",
   activeUpstreamId: "",
+  activeUpstreamMode: ACTIVE_UPSTREAM_MODES.SINGLE,
+  selectedUpstreamId: "",
   currentTab: "subscription",
 };
+let draggingUpstreamId = "";
 
 async function copyText(value) {
   if (navigator.clipboard && window.isSecureContext) {
@@ -230,35 +240,82 @@ function showDashboard() {
   activateTab(state.currentTab || "subscription");
 }
 
+function createFallbackUpstream(upstreamId = state.activeUpstreamId || state.selectedUpstreamId) {
+  return {
+    id: upstreamId,
+    label: "主上游",
+    moduleLabel: "snail-default",
+    description: "",
+    capabilities: {
+      supportsStatusQuery: true,
+      supportsInviteCode: true,
+    },
+    supportedTypes: Object.keys(protocolLabels),
+    remark: "",
+    active: true,
+    config: {
+      enabled: true,
+      name: "主上游",
+      remark: "",
+      runtimeMode: "always_refresh",
+      trafficThresholdPercent: 20,
+      maxRegistrationAgeMinutes: 120,
+      subscriptionUpdateIntervalMinutes: 30,
+      inviteCode: "",
+      settings: {},
+    },
+    settingFields: [],
+  };
+}
+
+function getOrderedUpstreams() {
+  const upstreamById = new Map(state.upstreams.map((item) => [item.id, item]));
+  const ordered = [];
+  const seen = new Set();
+
+  (Array.isArray(state.upstreamOrder) ? state.upstreamOrder : []).forEach((upstreamId) => {
+    if (!upstreamById.has(upstreamId) || seen.has(upstreamId)) {
+      return;
+    }
+
+    seen.add(upstreamId);
+    ordered.push(upstreamById.get(upstreamId));
+  });
+
+  state.upstreams.forEach((upstream) => {
+    if (seen.has(upstream.id)) {
+      return;
+    }
+
+    seen.add(upstream.id);
+    ordered.push(upstream);
+  });
+
+  return ordered;
+}
+
 function getActiveUpstream() {
   return (
     state.upstreams.find((item) => item.id === state.activeUpstreamId) ||
-    state.upstreams[0] || {
-      id: state.activeUpstreamId,
-      label: "主上游",
-      moduleLabel: "snail-default",
-      description: "",
-      capabilities: {
-        supportsStatusQuery: true,
-        supportsInviteCode: true,
-      },
-      supportedTypes: Object.keys(protocolLabels),
-      remark: "",
-      active: true,
-      config: {
-        enabled: true,
-        name: "主上游",
-        remark: "",
-        runtimeMode: "always_refresh",
-        trafficThresholdPercent: 20,
-        maxRegistrationAgeMinutes: 120,
-        subscriptionUpdateIntervalMinutes: 30,
-        inviteCode: "",
-        settings: {},
-      },
-      settingFields: [],
-    }
+    getOrderedUpstreams()[0] ||
+    createFallbackUpstream(state.activeUpstreamId)
   );
+}
+
+function getSelectedUpstream() {
+  return (
+    getOrderedUpstreams().find((item) => item.id === state.selectedUpstreamId) ||
+    getActiveUpstream() ||
+    createFallbackUpstream(state.selectedUpstreamId)
+  );
+}
+
+function isPollingMode() {
+  return state.activeUpstreamMode === ACTIVE_UPSTREAM_MODES.POLLING;
+}
+
+function getRuntimeSelectionLabel(upstream = getActiveUpstream()) {
+  return isPollingMode() ? "轮询模式" : upstream?.label || "主上游";
 }
 
 function getCurrentUser() {
@@ -335,6 +392,128 @@ function describeMode(upstream) {
   }
 
   return `兼容模式：客户端每次拉取都会直接重新注册当前上游，不做查询判断；下游订阅按 ${updateIntervalText}。`;
+}
+
+function describeRuntimeSelection(upstream = getActiveUpstream()) {
+  if (!isPollingMode()) {
+    return describeMode(upstream);
+  }
+
+  const enabledNames = getOrderedUpstreams()
+    .filter((item) => item?.config?.enabled !== false)
+    .map((item) => item.label);
+  if (enabledNames.length === 0) {
+    return "轮询模式：当前没有可用的启用上游，请先启用至少一个上游。";
+  }
+
+  return `轮询模式：下游请求会按左侧排序顺序依次尝试已启用上游，直到某个上游注册成功并返回结果。当前顺序：${enabledNames.join(" → ")}。`;
+}
+
+function selectUpstreamConfig(upstreamId) {
+  if (!upstreamId || upstreamId === state.selectedUpstreamId) {
+    return;
+  }
+
+  state.selectedUpstreamId = upstreamId;
+  renderUpstreamList();
+  syncUpstreamForm();
+}
+
+async function persistUpstreamOrder(nextOrder) {
+  const previousOrder = [...state.upstreamOrder];
+  state.upstreamOrder = [...nextOrder];
+  renderUpstreamSwitcher();
+  renderUpstreamList();
+
+  try {
+    await requestJson("/api/settings", {
+      method: "POST",
+      body: JSON.stringify({
+        upstreamOrder: nextOrder,
+      }),
+    });
+  } catch (error) {
+    state.upstreamOrder = previousOrder;
+    renderUpstreamSwitcher();
+    renderUpstreamList();
+    syncUpstreamForm();
+    setStatus(error.message, "error");
+  }
+}
+
+function renderUpstreamList() {
+  if (!upstreamList) {
+    return;
+  }
+
+  upstreamList.innerHTML = "";
+
+  getOrderedUpstreams().forEach((upstream, index) => {
+    const item = document.createElement("button");
+    item.type = "button";
+    item.className = `upstream-list-item${upstream.id === state.selectedUpstreamId ? " active" : ""}${upstream.config?.enabled === false ? " disabled" : ""}`;
+    item.draggable = true;
+    item.dataset.upstreamId = upstream.id;
+    item.innerHTML = `
+      <span class="upstream-list-item__order">${String(index + 1).padStart(2, "0")}</span>
+      <span class="upstream-list-item__body">
+        <strong>${upstream.label || upstream.id}</strong>
+        <small>${upstream.config?.enabled === false ? "已停用" : upstream.id}</small>
+      </span>
+      <span class="upstream-list-item__drag">⋮⋮</span>
+    `;
+
+    item.addEventListener("click", () => {
+      selectUpstreamConfig(upstream.id);
+    });
+
+    item.addEventListener("dragstart", (event) => {
+      draggingUpstreamId = upstream.id;
+      item.classList.add("dragging");
+      event.dataTransfer.effectAllowed = "move";
+      event.dataTransfer.setData("text/plain", upstream.id);
+    });
+
+    item.addEventListener("dragend", () => {
+      draggingUpstreamId = "";
+      item.classList.remove("dragging");
+    });
+
+    item.addEventListener("dragover", (event) => {
+      if (!draggingUpstreamId || draggingUpstreamId === upstream.id) {
+        return;
+      }
+
+      event.preventDefault();
+      event.dataTransfer.dropEffect = "move";
+      item.classList.add("drag-target");
+    });
+
+    item.addEventListener("dragleave", () => {
+      item.classList.remove("drag-target");
+    });
+
+    item.addEventListener("drop", async (event) => {
+      item.classList.remove("drag-target");
+      if (!draggingUpstreamId || draggingUpstreamId === upstream.id) {
+        return;
+      }
+
+      event.preventDefault();
+      const orderedIds = getOrderedUpstreams()
+        .map((item) => item.id)
+        .filter((upstreamId) => upstreamId !== draggingUpstreamId);
+      const targetIndex = orderedIds.indexOf(upstream.id);
+      if (targetIndex < 0) {
+        return;
+      }
+
+      orderedIds.splice(targetIndex, 0, draggingUpstreamId);
+      await persistUpstreamOrder(orderedIds);
+    });
+
+    upstreamList.appendChild(item);
+  });
 }
 
 function fillMeta(registration) {
@@ -660,16 +839,18 @@ function renderProviderSettingsFields(upstream) {
 }
 
 function syncUpstreamForm() {
-  const upstream = getActiveUpstream();
-  const config = upstream.config || {};
-  const supportsStatusQuery = upstreamSupportsStatusQuery(upstream);
-  const supportsInviteCode = upstreamSupportsInviteCode(upstream);
+  const runtimeUpstream = getActiveUpstream();
+  const selectedUpstream = getSelectedUpstream();
+  const config = selectedUpstream.config || {};
+  const supportsStatusQuery = upstreamSupportsStatusQuery(selectedUpstream);
+  const supportsInviteCode = upstreamSupportsInviteCode(selectedUpstream);
+  const runtimeSupportsInviteCode = upstreamSupportsInviteCode(runtimeUpstream);
 
-  setText(activeUpstreamLabel, upstream.label || "主上游");
-  setText(modeDescription, describeMode(upstream));
-  renderUpstreamOverview(upstream);
+  setText(activeUpstreamLabel, getRuntimeSelectionLabel(runtimeUpstream));
+  setText(modeDescription, describeRuntimeSelection(runtimeUpstream));
+  renderUpstreamOverview(selectedUpstream);
 
-  setInputValue(upstreamNameInput, config.name || upstream.label || "");
+  setInputValue(upstreamNameInput, config.name || selectedUpstream.label || "");
   setInputValue(upstreamRemarkInput, config.remark || "");
   setCheckboxValue(upstreamEnabledInput, config.enabled !== false);
   setInputValue(upstreamInviteCodeInput, config.inviteCode || "");
@@ -682,10 +863,10 @@ function syncUpstreamForm() {
     upstreamInviteCodeInput.placeholder = supportsInviteCode ? "可选" : "当前上游不支持邀请码";
   }
   if (registerInviteCodeInput) {
-    registerInviteCodeInput.disabled = !supportsInviteCode;
-    registerInviteCodeInput.placeholder = supportsInviteCode
-      ? "可选，不填则使用当前上游默认邀请码"
-      : "当前上游不支持邀请码";
+    registerInviteCodeInput.disabled = !runtimeSupportsInviteCode;
+    registerInviteCodeInput.placeholder = runtimeSupportsInviteCode
+      ? "可选，不填则使用当前运行上游默认邀请码"
+      : "当前运行上游不支持邀请码";
   }
 
   const radio = upstreamForm?.querySelector(`input[name="runtimeMode"][value="${config.runtimeMode || "always_refresh"}"]`);
@@ -708,7 +889,7 @@ function syncUpstreamForm() {
     maxRegistrationAgeInput.disabled = !supportsStatusQuery;
   }
 
-  renderProviderSettingsFields(upstream);
+  renderProviderSettingsFields(selectedUpstream);
 }
 
 function syncSystemForm() {
@@ -794,15 +975,27 @@ async function switchActiveUpstream(upstreamId) {
   clearStatus();
 
   try {
+    const nextSettings =
+      upstreamId === POLLING_UPSTREAM_VALUE
+        ? {
+            activeUpstreamMode: ACTIVE_UPSTREAM_MODES.POLLING,
+          }
+        : {
+            activeUpstreamId: upstreamId,
+            activeUpstreamMode: ACTIVE_UPSTREAM_MODES.SINGLE,
+          };
     await requestJson("/api/settings", {
       method: "POST",
-      body: JSON.stringify({
-        activeUpstreamId: upstreamId,
-      }),
+      body: JSON.stringify(nextSettings),
     });
 
     await refreshSession();
-    setStatus(`已切换到 ${getActiveUpstream().label}。下游固定订阅链接不会变化。`, "success");
+    setStatus(
+      isPollingMode()
+        ? "已切换到轮询模式。下游请求会按排序顺序自动尝试上游。"
+        : `已切换到 ${getActiveUpstream().label}。下游固定订阅链接不会变化。`,
+      "success",
+    );
   } catch (error) {
     if (error.status === 401) {
       showLogin();
@@ -819,38 +1012,48 @@ function renderUpstreamSwitcher() {
     return;
   }
 
-  const previousValue = upstreamSwitcher.value;
   upstreamSwitcher.innerHTML = "";
 
-  state.upstreams.forEach((upstream) => {
+  const pollingOption = document.createElement("option");
+  pollingOption.value = POLLING_UPSTREAM_VALUE;
+  pollingOption.textContent = "轮询模式 · 按排序顺序依次尝试";
+  upstreamSwitcher.appendChild(pollingOption);
+
+  getOrderedUpstreams().forEach((upstream) => {
     const modeText = upstream.config?.runtimeMode === "smart_usage" ? "智能模式" : "兼容模式";
     const statusText = upstream.config?.enabled === false ? "已停用" : modeText;
     const option = document.createElement("option");
     option.value = upstream.id;
     option.textContent = `${upstream.label} · ${statusText}`;
+    option.disabled = upstream.config?.enabled === false;
     upstreamSwitcher.appendChild(option);
   });
 
-  const nextValue = state.upstreams.some((item) => item.id === state.activeUpstreamId)
-    ? state.activeUpstreamId
-    : previousValue;
-  upstreamSwitcher.value = nextValue || state.activeUpstreamId || state.upstreams[0]?.id || "";
+  upstreamSwitcher.value = isPollingMode()
+    ? POLLING_UPSTREAM_VALUE
+    : state.activeUpstreamId || getOrderedUpstreams()[0]?.id || "";
 }
 
 function applySession(payload) {
   state.displayOrigin = payload.displayOrigin || "";
   state.users = Array.isArray(payload.users) ? payload.users : [];
   state.upstreams = Array.isArray(payload.upstreams) ? payload.upstreams : [];
+  state.upstreamOrder = Array.isArray(payload.upstreamOrder) ? payload.upstreamOrder : [];
   state.relayUrlsByUser = payload.relayUrlsByUser || {};
   state.userSummaries = Array.isArray(payload.userSummaries) ? payload.userSummaries : [];
   state.activeUpstreamId = payload.activeUpstreamId || state.upstreams[0]?.id || "";
+  state.activeUpstreamMode = payload.activeUpstreamMode || ACTIVE_UPSTREAM_MODES.SINGLE;
 
   if (!state.users.some((user) => user.key === state.currentUserKey)) {
     state.currentUserKey = payload.defaultUserKey || state.users[0]?.key || "userA";
   }
+  if (!getOrderedUpstreams().some((upstream) => upstream.id === state.selectedUpstreamId)) {
+    state.selectedUpstreamId = state.activeUpstreamId || getOrderedUpstreams()[0]?.id || "";
+  }
 
   setText(activeUserLabel, getCurrentUser().label);
   renderUpstreamSwitcher();
+  renderUpstreamList();
   renderUserSwitcher();
   syncUpstreamForm();
   syncSystemForm();
@@ -862,8 +1065,8 @@ function applyUserPayload(payload) {
     payload.relayUrls || state.relayUrlsByUser[state.currentUserKey] || {};
 
   setText(activeUserLabel, payload.user?.label || getCurrentUser().label);
-  setText(activeUpstreamLabel, upstream.label || getActiveUpstream().label);
-  setText(modeDescription, describeMode(upstream));
+  setText(activeUpstreamLabel, getRuntimeSelectionLabel(upstream));
+  setText(modeDescription, describeRuntimeSelection(upstream));
 
   fillMeta(payload.registration);
   renderLinks(payload.relayUrls || state.relayUrlsByUser[state.currentUserKey] || null, upstream);
@@ -875,7 +1078,7 @@ function applyUserPayload(payload) {
 
 async function loadUserState() {
   setText(activeUserLabel, getCurrentUser().label);
-  setText(activeUpstreamLabel, getActiveUpstream().label);
+  setText(activeUpstreamLabel, getRuntimeSelectionLabel(getActiveUpstream()));
 
   try {
     const payload = await requestJson(
@@ -963,12 +1166,16 @@ if (registerForm) {
           type: "full",
           inviteCode,
           userKey: state.currentUserKey,
-          upstreamId: state.activeUpstreamId,
         }),
       });
 
       applyUserPayload(payload);
-      setStatus(`当前用户已在 ${getActiveUpstream().label} 下完成重新注册。`, "success");
+      setStatus(
+        isPollingMode()
+          ? `当前用户已按轮询模式完成注册，命中 ${payload.upstream?.label || "可用上游"}。`
+          : `当前用户已在 ${getActiveUpstream().label} 下完成重新注册。`,
+        "success",
+      );
     } catch (error) {
       if (error.status === 401) {
         showLogin();
@@ -990,7 +1197,7 @@ if (upstreamForm) {
     setLoading(saveUpstreamButton, "保存中...", true);
 
     const formData = new FormData(upstreamForm);
-    const upstream = getActiveUpstream();
+    const upstream = getSelectedUpstream();
     const providerSettings = {};
     Array.from(upstream?.settingFields || []).forEach((field) => {
       const element = providerSettingsFields?.querySelector(`[data-provider-key="${field.key}"]`);
@@ -1006,7 +1213,7 @@ if (upstreamForm) {
       await requestJson("/api/settings", {
         method: "POST",
         body: JSON.stringify({
-          upstreamId: state.activeUpstreamId,
+          upstreamId: state.selectedUpstreamId,
           name: (formData.get("name") || "").toString().trim(),
           remark: (formData.get("remark") || "").toString().trim(),
           enabled: upstreamEnabledInput?.checked,
@@ -1162,7 +1369,8 @@ tabButtons.forEach((button) => {
 if (upstreamSwitcher) {
   upstreamSwitcher.addEventListener("change", async (event) => {
     const nextUpstreamId = event.target.value;
-    if (!nextUpstreamId || nextUpstreamId === state.activeUpstreamId) {
+    const currentValue = isPollingMode() ? POLLING_UPSTREAM_VALUE : state.activeUpstreamId;
+    if (!nextUpstreamId || nextUpstreamId === currentValue) {
       return;
     }
 

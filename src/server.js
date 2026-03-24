@@ -8,11 +8,13 @@ const { URL } = require("node:url");
 
 const { ensureProxyConfigured } = require("./httpClient");
 const {
+  ACTIVE_UPSTREAM_MODES,
   DEFAULT_PASSWORD,
   DEFAULT_USER_KEY,
   RELAY_USERS,
   RUNTIME_MODES,
   getActiveUpstreamId,
+  getActiveUpstreamRuntime,
   getDisplayOrigin,
   getRelayToken,
   listRelayUsers,
@@ -34,7 +36,12 @@ const {
   reloadUpstreamModules,
 } = require("./upstreams/core/registry");
 const { URL_TYPES } = require("./upstreams/shared/snailApi");
-const { manualRegister, resolveRelayState, resolveViewState } = require("./upstreams/service");
+const {
+  getRuntimeCandidateUpstreamIds,
+  manualRegisterWithRuntime,
+  resolveRelayState,
+  resolveViewState,
+} = require("./upstreams/service");
 
 const HOST = process.env.HOST || "0.0.0.0";
 const PORT = Number.parseInt(process.env.PORT || "3000", 10);
@@ -57,6 +64,15 @@ const FORWARDED_HEADERS = new Set([
   "profile-update-interval",
   "profile-web-page-url",
   "subscription-userinfo",
+]);
+const URI_NAME_QUERY_KEYS = new Set([
+  "description",
+  "label",
+  "name",
+  "ps",
+  "remark",
+  "remarks",
+  "title",
 ]);
 
 function normalizeConfiguredOrigin(input) {
@@ -210,7 +226,7 @@ function createRandomNodeName() {
 }
 
 function normalizeNodeNameForMatching(value) {
-  return value.normalize("NFKC").replace(/[。｡﹒．]/g, ".");
+  return value.normalize("NFKC").replace(/[\u3002\uFF61\uFE52\uFF0E]/g, ".");
 }
 
 function isAdvertisementNodeName(value) {
@@ -304,6 +320,32 @@ function encodeBase64(value) {
   return Buffer.from(value, "utf8").toString("base64");
 }
 
+function sanitizeUriQueryParams(uri, nameMap) {
+  try {
+    const parsedUrl = new URL(uri);
+    let changed = false;
+
+    URI_NAME_QUERY_KEYS.forEach((key) => {
+      const currentValue = parsedUrl.searchParams.get(key);
+      if (!currentValue) {
+        return;
+      }
+
+      const sanitizedValue = getSanitizedNodeName(currentValue, nameMap);
+      if (sanitizedValue === currentValue) {
+        return;
+      }
+
+      parsedUrl.searchParams.set(key, sanitizedValue);
+      changed = true;
+    });
+
+    return changed ? parsedUrl.toString() : uri;
+  } catch (error) {
+    return uri;
+  }
+}
+
 function sanitizeUriLine(line, nameMap) {
   const trimmed = line.trim();
   if (!trimmed) {
@@ -328,13 +370,14 @@ function sanitizeUriLine(line, nameMap) {
     }
   }
 
-  const hashIndex = trimmed.indexOf("#");
+  const sanitizedQueryUri = sanitizeUriQueryParams(trimmed, nameMap);
+  const hashIndex = sanitizedQueryUri.indexOf("#");
   if (hashIndex < 0) {
-    return line;
+    return sanitizedQueryUri === trimmed ? line : sanitizedQueryUri;
   }
 
-  const prefix = trimmed.slice(0, hashIndex + 1);
-  const rawName = trimmed.slice(hashIndex + 1);
+  const prefix = sanitizedQueryUri.slice(0, hashIndex + 1);
+  const rawName = sanitizedQueryUri.slice(hashIndex + 1);
   const decodedName = (() => {
     try {
       return decodeURIComponent(rawName);
@@ -345,7 +388,7 @@ function sanitizeUriLine(line, nameMap) {
   const sanitizedName = getSanitizedNodeName(decodedName, nameMap);
 
   if (sanitizedName === decodedName) {
-    return line;
+    return sanitizedQueryUri === trimmed ? line : sanitizedQueryUri;
   }
 
   return `${prefix}${encodeURIComponent(sanitizedName)}`;
@@ -755,7 +798,7 @@ async function handleSession(request, response) {
   }
 
   const origin = await getRequestOrigin(request);
-  const activeUpstreamId = await getActiveUpstreamId();
+  const { activeUpstreamId, activeUpstreamMode, upstreamOrder } = await getActiveUpstreamRuntime();
   const displayOrigin = await getDisplayOrigin();
   const relayUsers = await listRelayUsers();
   const upstreams = await listUpstreamConfigs();
@@ -775,10 +818,16 @@ async function handleSession(request, response) {
     defaultPassword: DEFAULT_PASSWORD,
     displayOrigin,
     activeUpstreamId,
+    activeUpstreamMode,
+    upstreamOrder,
     upstreams,
     runtimeModes: {
       alwaysRefresh: RUNTIME_MODES.ALWAYS_REFRESH,
       smartUsage: RUNTIME_MODES.SMART_USAGE,
+    },
+    activeUpstreamModes: {
+      single: ACTIVE_UPSTREAM_MODES.SINGLE,
+      polling: ACTIVE_UPSTREAM_MODES.POLLING,
     },
     users: relayUsers.map((user) => ({
       key: user.key,
@@ -809,6 +858,8 @@ async function handleUpdateSettings(request, response) {
   const result = await updatePanelSettings({
     displayOrigin: body.displayOrigin,
     activeUpstreamId: body.activeUpstreamId,
+    activeUpstreamMode: body.activeUpstreamMode,
+    upstreamOrder: body.upstreamOrder,
     upstreamId: body.upstreamId,
     runtimeMode: body.runtimeMode,
     trafficThresholdPercent: body.trafficThresholdPercent,
@@ -825,7 +876,9 @@ async function handleUpdateSettings(request, response) {
     success: true,
     message: "Settings updated.",
     activeUpstreamId: result.activeUpstreamId,
+    activeUpstreamMode: result.activeUpstreamMode,
     displayOrigin: result.displayOrigin,
+    upstreamOrder: result.upstreamOrder,
     updatedAt: result.updatedAt,
     upstreamConfig: result.upstreamConfig,
   });
@@ -852,7 +905,8 @@ async function handleCreateSubscription(request, response) {
   const inviteCode = typeof body.inviteCode === "string" ? body.inviteCode.trim() : "";
   const type = normalizeType(body.type);
   const userKey = normalizeUserKey(body.userKey);
-  const upstreamId = (body.upstreamId || (await getActiveUpstreamId())).toString();
+  const requestedUpstreamId =
+    typeof body.upstreamId === "string" ? body.upstreamId.trim() : "";
 
   if (!SUPPORTED_TYPES.has(type)) {
     sendJson(response, 400, {
@@ -863,14 +917,18 @@ async function handleCreateSubscription(request, response) {
     return;
   }
 
-  const result = await manualRegister(userKey, upstreamId, {
+  const result = await manualRegisterWithRuntime(userKey, {
     inviteCode,
     relayType: type === "full" ? "universal" : type,
+    upstreamId: requestedUpstreamId || undefined,
   });
   const relayToken = await getRelayToken(userKey);
   const relayUrls = buildRelayUrls(await getRequestOrigin(request), relayToken);
   const upstreams = await listUpstreamConfigs();
-  const upstream = getUpstreamSummary(upstreams, upstreamId);
+  const upstream = getUpstreamSummary(
+    upstreams,
+    result.upstreamId || requestedUpstreamId || (await getActiveUpstreamId()),
+  );
   const user = RELAY_USERS.find((item) => item.key === userKey) || RELAY_USERS[0];
 
   sendJson(response, 200, {
@@ -919,137 +977,148 @@ async function proxySubscription(response, request, type, url) {
     return;
   }
 
-  const upstreamId = await getActiveUpstreamId();
-  const { runtimeMode, upstreamConfig, userState } = await resolveRelayState(
-    relayUser.key,
-    upstreamId,
-    type,
-  );
-  const latest = userState.latestRegistration;
-  const upstreamUrl = latest?.clientUrls?.[type];
-  const subscriptionUpdateIntervalMinutes = normalizeSubscriptionUpdateIntervalMinutes(
-    upstreamConfig?.subscriptionUpdateIntervalMinutes,
-  );
-  const profileUpdateIntervalHours = toProfileUpdateIntervalHours(
-    subscriptionUpdateIntervalMinutes,
-  );
-
-  if (!upstreamUrl) {
-    sendText(response, 400, `Unsupported relay type: ${type}`);
+  const candidateUpstreamIds = await getRuntimeCandidateUpstreamIds(type);
+  if (candidateUpstreamIds.length === 0) {
+    sendText(response, 503, "No enabled upstream is available.");
     return;
   }
 
-  if (latest.mock) {
-    await appendUserHistory(relayUser.key, upstreamId, {
-      action: "relay_mock",
-      title: "已返回 Mock 订阅",
-      message: "当前用户处于 Mock 模式，客户端收到的是本地生成的调试内容。",
-      mode: runtimeMode,
-      relayType: type,
-      requestSource: "relay",
-      registration: latest,
-      usage: userState.latestUsage,
-    });
+  let lastFailure = null;
 
-    sendText(
-      response,
-      200,
-      [
-        "# Mock relay subscription",
-        `user=${relayUser.label}`,
-        `type=${type}`,
-        `email=${latest.email}`,
-        `inviteCode=${latest.inviteCode || ""}`,
-        `createdAt=${latest.createdAt || ""}`,
-      ].join("\n"),
-      {
-        "profile-title": `Snail Mock ${type}`,
-        "profile-update-interval": profileUpdateIntervalHours,
-      },
-    );
-    return;
-  }
+  for (const upstreamId of candidateUpstreamIds) {
+    let runtimeMode = "";
+    let upstreamConfig = null;
+    let userState = {
+      latestRegistration: null,
+      latestUsage: null,
+    };
+    let latest = null;
 
-  let upstreamResponse;
+    try {
+      const result = await resolveRelayState(relayUser.key, upstreamId, type);
+      runtimeMode = result.runtimeMode;
+      upstreamConfig = result.upstreamConfig;
+      userState = result.userState;
+      latest = userState.latestRegistration;
 
-  try {
-    upstreamResponse = await fetchUpstreamSubscription(upstreamUrl);
-  } catch (error) {
-    await appendUserHistory(relayUser.key, upstreamId, {
-      action: "relay_failed",
-      title: "中转拉取上游失败",
-      message: error.message,
-      mode: runtimeMode,
-      relayType: type,
-      requestSource: "relay",
-      registration: latest,
-      usage: userState.latestUsage,
-    });
-    sendText(response, 502, `Upstream subscription request failed: ${error.message}`);
-    return;
-  }
+      const upstreamUrl = latest?.clientUrls?.[type];
+      const subscriptionUpdateIntervalMinutes = normalizeSubscriptionUpdateIntervalMinutes(
+        upstreamConfig?.subscriptionUpdateIntervalMinutes,
+      );
+      const profileUpdateIntervalHours = toProfileUpdateIntervalHours(
+        subscriptionUpdateIntervalMinutes,
+      );
 
-  if (!upstreamResponse.ok) {
-    await appendUserHistory(relayUser.key, upstreamId, {
-      action: "relay_failed",
-      title: "上游返回异常状态码",
-      message: `上游状态码 ${upstreamResponse.status}`,
-      mode: runtimeMode,
-      relayType: type,
-      requestSource: "relay",
-      registration: latest,
-      usage: userState.latestUsage,
-      details: {
-        status: upstreamResponse.status,
-      },
-    });
+      if (!upstreamUrl) {
+        throw new Error(`Unsupported relay type: ${type}`);
+      }
 
-    sendText(
-      response,
-      upstreamResponse.status,
-      `Upstream subscription request failed with status ${upstreamResponse.status}.`,
-    );
-    return;
-  }
+      if (latest.mock) {
+        await appendUserHistory(relayUser.key, upstreamId, {
+          action: "relay_mock",
+          title: "已返回 Mock 订阅",
+          message: "当前用户处于 Mock 模式，客户端收到的是本地生成的调试内容。",
+          mode: runtimeMode,
+          relayType: type,
+          requestSource: "relay",
+          registration: latest,
+          usage: userState.latestUsage,
+        });
 
-  await appendUserHistory(relayUser.key, upstreamId, {
-    action: "relay_success",
-    title: "已成功中转客户端订阅",
-    message: `客户端成功拉取 ${type} 订阅。`,
-    mode: runtimeMode,
-    relayType: type,
-    requestSource: "relay",
-    registration: latest,
-    usage: userState.latestUsage,
-  });
+        sendText(
+          response,
+          200,
+          [
+            "# Mock relay subscription",
+            `user=${relayUser.label}`,
+            `type=${type}`,
+            `email=${latest.email}`,
+            `inviteCode=${latest.inviteCode || ""}`,
+            `createdAt=${latest.createdAt || ""}`,
+          ].join("\n"),
+          {
+            "profile-title": `Snail Mock ${type}`,
+            "profile-update-interval": profileUpdateIntervalHours,
+          },
+        );
+        return;
+      }
 
-  const headers = {};
-  upstreamResponse.headers.forEach((value, key) => {
-    const normalizedKey = key.toLowerCase();
-    if (FORWARDED_HEADERS.has(normalizedKey)) {
-      headers[normalizedKey] = value;
+      const upstreamResponse = await fetchUpstreamSubscription(upstreamUrl);
+      if (!upstreamResponse.ok) {
+        const nextError = new Error(
+          `Upstream subscription request failed with status ${upstreamResponse.status}.`,
+        );
+        nextError.status = upstreamResponse.status;
+        throw nextError;
+      }
+
+      await appendUserHistory(relayUser.key, upstreamId, {
+        action: "relay_success",
+        title: "已成功中转客户端订阅",
+        message: `客户端成功拉取 ${type} 订阅。`,
+        mode: runtimeMode,
+        relayType: type,
+        requestSource: "relay",
+        registration: latest,
+        usage: userState.latestUsage,
+      });
+
+      const headers = {};
+      upstreamResponse.headers.forEach((value, key) => {
+        const normalizedKey = key.toLowerCase();
+        if (FORWARDED_HEADERS.has(normalizedKey)) {
+          headers[normalizedKey] = value;
+        }
+      });
+      if (!headers["subscription-userinfo"]) {
+        const fallbackUserInfoHeader = await fetchFallbackSubscriptionUserInfoHeader(
+          latest?.clientUrls,
+          type,
+        );
+        if (fallbackUserInfoHeader) {
+          headers["subscription-userinfo"] = fallbackUserInfoHeader;
+        }
+      }
+      headers["profile-update-interval"] = profileUpdateIntervalHours;
+
+      const body = sanitizeSubscriptionBody(Buffer.from(await upstreamResponse.arrayBuffer()));
+      response.writeHead(200, headers);
+
+      if (request.method === "HEAD") {
+        response.end();
+        return;
+      }
+
+      response.end(body);
+      return;
+    } catch (error) {
+      lastFailure = error;
+
+      await appendUserHistory(relayUser.key, upstreamId, {
+        action: candidateUpstreamIds.length > 1 ? "polling_skip" : "relay_failed",
+        title: candidateUpstreamIds.length > 1 ? "轮询跳过不可用上游" : "中转拉取上游失败",
+        message: error.message,
+        mode: runtimeMode,
+        relayType: type,
+        requestSource: "relay",
+        registration: latest,
+        usage: userState.latestUsage,
+        details: {
+          polling: candidateUpstreamIds.length > 1,
+          status: error.status || null,
+        },
+      });
     }
-  });
-  if (!headers["subscription-userinfo"]) {
-    const fallbackUserInfoHeader = await fetchFallbackSubscriptionUserInfoHeader(
-      latest?.clientUrls,
-      type,
-    );
-    if (fallbackUserInfoHeader) {
-      headers["subscription-userinfo"] = fallbackUserInfoHeader;
-    }
-  }
-  headers["profile-update-interval"] = profileUpdateIntervalHours;
-
-  const body = sanitizeSubscriptionBody(Buffer.from(await upstreamResponse.arrayBuffer()));
-  response.writeHead(200, headers);
-
-  if (request.method === "HEAD") {
-    response.end();
-    return;
   }
 
-  response.end(body);
+  sendText(
+    response,
+    candidateUpstreamIds.length > 1 ? 502 : lastFailure?.status || 502,
+    candidateUpstreamIds.length > 1
+      ? `No available upstream succeeded: ${lastFailure?.message || "Unknown error."}`
+      : `Upstream subscription request failed: ${lastFailure?.message || "Unknown error."}`,
+  );
 }
 
 async function handleHealth(response) {

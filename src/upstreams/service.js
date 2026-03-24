@@ -1,6 +1,11 @@
 "use strict";
 
-const { getUpstreamConfig, RUNTIME_MODES } = require("../authStore");
+const {
+  ACTIVE_UPSTREAM_MODES,
+  getUpstreamConfig,
+  loadSecurityState,
+  RUNTIME_MODES,
+} = require("../authStore");
 const {
   appendUserHistory,
   getUserState,
@@ -74,6 +79,33 @@ function getUpstreamContext(upstreamId, upstreamConfig) {
     module,
     upstreamConfig,
   };
+}
+
+function upstreamSupportsRelayType(upstreamId, relayType) {
+  if (!relayType) {
+    return true;
+  }
+
+  const module = getUpstreamModule(upstreamId);
+  const supportedTypes = Array.isArray(module?.manifest?.supportedTypes)
+    ? module.manifest.supportedTypes
+    : [];
+  return supportedTypes.length === 0 || supportedTypes.includes(relayType);
+}
+
+async function getRuntimeCandidateUpstreamIds(relayType = "") {
+  const state = await loadSecurityState();
+  const orderedIds = Array.isArray(state.upstreamOrder)
+    ? state.upstreamOrder.filter((upstreamId) => state.upstreams?.[upstreamId])
+    : Object.keys(state.upstreams || {});
+  const enabledIds = orderedIds.filter((upstreamId) => state.upstreams?.[upstreamId]?.enabled !== false);
+
+  if (state.activeUpstreamMode !== ACTIVE_UPSTREAM_MODES.POLLING) {
+    return state.activeUpstreamId ? [state.activeUpstreamId] : enabledIds.slice(0, 1);
+  }
+
+  const candidateIds = enabledIds.filter((upstreamId) => upstreamSupportsRelayType(upstreamId, relayType));
+  return candidateIds.length > 0 ? candidateIds : enabledIds;
 }
 
 async function createRegistration(userKey, upstreamId, options = {}) {
@@ -459,9 +491,46 @@ async function manualRegister(userKey, upstreamId, options = {}) {
   });
 }
 
+async function manualRegisterWithRuntime(userKey, options = {}) {
+  const requestedRelayType = options.relayType || "";
+  const candidateIds = options.upstreamId
+    ? [options.upstreamId]
+    : await getRuntimeCandidateUpstreamIds(requestedRelayType);
+  let lastError = null;
+
+  for (const upstreamId of candidateIds) {
+    try {
+      const result = await manualRegister(userKey, upstreamId, options);
+      return {
+        ...result,
+        upstreamId,
+      };
+    } catch (error) {
+      lastError = error;
+      if (candidateIds.length > 1) {
+        await appendUserHistory(userKey, upstreamId, {
+          action: "polling_skip",
+          title: "杞涓婃父璺宠繃澶辫触鍊欓€夐」",
+          message: error.message,
+          requestSource: "manual",
+          relayType: requestedRelayType,
+          details: {
+            polling: true,
+          },
+        });
+      }
+    }
+  }
+
+  throw lastError || new Error("No available upstream.");
+}
+
 module.exports = {
+  getRuntimeCandidateUpstreamIds,
   manualRegister,
+  manualRegisterWithRuntime,
   mergeRegistrationWithUsage,
   resolveRelayState,
   resolveViewState,
+  upstreamSupportsRelayType,
 };

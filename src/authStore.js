@@ -28,6 +28,10 @@ const RUNTIME_MODES = Object.freeze({
   ALWAYS_REFRESH: "always_refresh",
   SMART_USAGE: "smart_usage",
 });
+const ACTIVE_UPSTREAM_MODES = Object.freeze({
+  SINGLE: "single",
+  POLLING: "polling",
+});
 
 function hashPassword(password, salt) {
   return crypto.scryptSync(password, salt, 64).toString("hex");
@@ -114,15 +118,63 @@ function normalizeUpstreamConfigs(rawUpstreams, legacyRuntimeMode) {
   return result;
 }
 
-function resolveActiveUpstreamId(input, upstreams) {
+function getUpstreamSortLabel(upstreamId, upstreams) {
+  const module = getUpstreamModule(upstreamId);
+  return (
+    upstreams?.[upstreamId]?.name ||
+    module?.manifest?.label ||
+    upstreamId ||
+    ""
+  ).toString();
+}
+
+function normalizeActiveUpstreamMode(input) {
+  return (input || "").toString().trim() === ACTIVE_UPSTREAM_MODES.POLLING
+    ? ACTIVE_UPSTREAM_MODES.POLLING
+    : ACTIVE_UPSTREAM_MODES.SINGLE;
+}
+
+function normalizeUpstreamOrder(rawOrder, upstreams) {
+  const knownIds = listUpstreamModules().map((module) => module.manifest.id);
+  const seen = new Set();
+  const orderedIds = [];
+
+  if (Array.isArray(rawOrder)) {
+    rawOrder.forEach((value) => {
+      const upstreamId = (value || "").toString().trim();
+      if (!upstreamId || seen.has(upstreamId) || !knownIds.includes(upstreamId)) {
+        return;
+      }
+
+      seen.add(upstreamId);
+      orderedIds.push(upstreamId);
+    });
+  }
+
+  const missingIds = knownIds
+    .filter((upstreamId) => !seen.has(upstreamId))
+    .sort((left, right) =>
+      getUpstreamSortLabel(left, upstreams).localeCompare(
+        getUpstreamSortLabel(right, upstreams),
+        "zh-CN",
+        { numeric: true, sensitivity: "base" },
+      ),
+    );
+
+  return [...orderedIds, ...missingIds];
+}
+
+function resolveActiveUpstreamId(input, upstreams, upstreamOrder = []) {
   const candidate = (input || "").toString().trim();
   if (candidate && upstreams[candidate]?.enabled) {
     return candidate;
   }
 
-  const firstEnabled = Object.entries(upstreams).find(([, config]) => config?.enabled !== false);
-  if (firstEnabled) {
-    return firstEnabled[0];
+  const firstEnabledId = normalizeUpstreamOrder(upstreamOrder, upstreams).find(
+    (upstreamId) => upstreams[upstreamId]?.enabled !== false,
+  );
+  if (firstEnabledId) {
+    return firstEnabledId;
   }
 
   return getDefaultUpstreamId();
@@ -131,13 +183,17 @@ function resolveActiveUpstreamId(input, upstreams) {
 function createSecurityState(password, options = {}) {
   const salt = crypto.randomBytes(16).toString("hex");
   const upstreams = normalizeUpstreamConfigs(options.upstreams, options.runtimeMode);
+  const upstreamOrder = normalizeUpstreamOrder(options.upstreamOrder, upstreams);
+  const activeUpstreamMode = normalizeActiveUpstreamMode(options.activeUpstreamMode);
 
   return {
     passwordSalt: salt,
     passwordHash: hashPassword(password, salt),
     relayTokens: normalizeRelayTokens(options.relayTokens, options.legacyRelayToken),
     displayOrigin: normalizeDisplayOrigin(options.displayOrigin),
-    activeUpstreamId: resolveActiveUpstreamId(options.activeUpstreamId, upstreams),
+    activeUpstreamId: resolveActiveUpstreamId(options.activeUpstreamId, upstreams, upstreamOrder),
+    activeUpstreamMode,
+    upstreamOrder,
     upstreams,
     updatedAt: new Date().toISOString(),
   };
@@ -149,13 +205,17 @@ function normalizePanelState(rawState = {}) {
   }
 
   const upstreams = normalizeUpstreamConfigs(rawState.upstreams, rawState.runtimeMode);
+  const upstreamOrder = normalizeUpstreamOrder(rawState.upstreamOrder, upstreams);
+  const activeUpstreamMode = normalizeActiveUpstreamMode(rawState.activeUpstreamMode);
 
   return {
     passwordSalt: rawState.passwordSalt,
     passwordHash: rawState.passwordHash,
     relayTokens: normalizeRelayTokens(rawState.relayTokens, rawState.relayToken),
     displayOrigin: normalizeDisplayOrigin(rawState.displayOrigin),
-    activeUpstreamId: resolveActiveUpstreamId(rawState.activeUpstreamId, upstreams),
+    activeUpstreamId: resolveActiveUpstreamId(rawState.activeUpstreamId, upstreams, upstreamOrder),
+    activeUpstreamMode,
+    upstreamOrder,
     upstreams,
     updatedAt: rawState.updatedAt || new Date().toISOString(),
   };
@@ -223,6 +283,8 @@ async function updatePassword({ currentPassword, newPassword }) {
     relayTokens: state.relayTokens,
     displayOrigin: state.displayOrigin,
     activeUpstreamId: state.activeUpstreamId,
+    activeUpstreamMode: state.activeUpstreamMode,
+    upstreamOrder: state.upstreamOrder,
     upstreams: state.upstreams,
   });
   await saveSecurityState(nextState);
@@ -265,6 +327,15 @@ async function getActiveUpstreamId() {
   return state.activeUpstreamId;
 }
 
+async function getActiveUpstreamRuntime() {
+  const state = await loadSecurityState();
+  return {
+    activeUpstreamId: state.activeUpstreamId,
+    activeUpstreamMode: state.activeUpstreamMode,
+    upstreamOrder: Array.isArray(state.upstreamOrder) ? [...state.upstreamOrder] : [],
+  };
+}
+
 async function getUpstreamConfig(upstreamId) {
   const state = await loadSecurityState();
   const resolvedUpstreamId = upstreamId || state.activeUpstreamId;
@@ -273,25 +344,38 @@ async function getUpstreamConfig(upstreamId) {
 
 async function listUpstreamConfigs() {
   const state = await loadSecurityState();
+  const orderedIds = normalizeUpstreamOrder(state.upstreamOrder, state.upstreams);
 
-  return listUpstreamModules().map((module) => ({
-    id: module.manifest.id,
-    apiVersion: module.manifest.apiVersion,
-    label: state.upstreams[module.manifest.id]?.name || module.manifest.label,
-    moduleLabel: module.manifest.label,
-    description: module.manifest.description || "",
-    website: module.manifest.website || "",
-    docsUrl: module.manifest.docsUrl || "",
-    author: module.manifest.author || "",
-    capabilities: module.manifest.capabilities || {},
-    supportedTypes: Array.isArray(module.manifest.supportedTypes)
-      ? module.manifest.supportedTypes
-      : [],
-    remark: state.upstreams[module.manifest.id]?.remark || "",
-    settingFields: Array.isArray(module.manifest.settingFields) ? module.manifest.settingFields : [],
-    config: state.upstreams[module.manifest.id],
-    active: state.activeUpstreamId === module.manifest.id,
-  }));
+  return orderedIds
+    .map((upstreamId, index) => {
+      const module = getUpstreamModule(upstreamId);
+      if (!module) {
+        return null;
+      }
+
+      return {
+        id: module.manifest.id,
+        apiVersion: module.manifest.apiVersion,
+        label: state.upstreams[module.manifest.id]?.name || module.manifest.label,
+        moduleLabel: module.manifest.label,
+        description: module.manifest.description || "",
+        website: module.manifest.website || "",
+        docsUrl: module.manifest.docsUrl || "",
+        author: module.manifest.author || "",
+        capabilities: module.manifest.capabilities || {},
+        supportedTypes: Array.isArray(module.manifest.supportedTypes)
+          ? module.manifest.supportedTypes
+          : [],
+        remark: state.upstreams[module.manifest.id]?.remark || "",
+        settingFields: Array.isArray(module.manifest.settingFields) ? module.manifest.settingFields : [],
+        config: state.upstreams[module.manifest.id],
+        orderIndex: index,
+        active:
+          state.activeUpstreamMode === ACTIVE_UPSTREAM_MODES.SINGLE &&
+          state.activeUpstreamId === module.manifest.id,
+      };
+    })
+    .filter(Boolean);
 }
 
 async function updatePanelSettings(settings = {}) {
@@ -318,6 +402,17 @@ async function updatePanelSettings(settings = {}) {
     nextState.activeUpstreamId = module.manifest.id;
   }
 
+  if (settings.activeUpstreamMode !== undefined) {
+    nextState.activeUpstreamMode = normalizeActiveUpstreamMode(settings.activeUpstreamMode);
+  }
+
+  if (settings.upstreamOrder !== undefined) {
+    if (!Array.isArray(settings.upstreamOrder)) {
+      throw new Error("Upstream order must be an array.");
+    }
+    nextState.upstreamOrder = normalizeUpstreamOrder(settings.upstreamOrder, nextState.upstreams);
+  }
+
   const targetUpstreamId = settings.upstreamId || nextState.activeUpstreamId;
   if (targetUpstreamId) {
     const module = getUpstreamModule(targetUpstreamId);
@@ -339,19 +434,27 @@ async function updatePanelSettings(settings = {}) {
     });
   }
 
-  nextState.activeUpstreamId = resolveActiveUpstreamId(nextState.activeUpstreamId, nextState.upstreams);
+  nextState.upstreamOrder = normalizeUpstreamOrder(nextState.upstreamOrder, nextState.upstreams);
+  nextState.activeUpstreamId = resolveActiveUpstreamId(
+    nextState.activeUpstreamId,
+    nextState.upstreams,
+    nextState.upstreamOrder,
+  );
   nextState.updatedAt = new Date().toISOString();
 
   await saveSecurityState(nextState);
   return {
     activeUpstreamId: nextState.activeUpstreamId,
+    activeUpstreamMode: nextState.activeUpstreamMode,
     displayOrigin: nextState.displayOrigin,
+    upstreamOrder: nextState.upstreamOrder,
     updatedAt: nextState.updatedAt,
     upstreamConfig: nextState.upstreams[nextState.activeUpstreamId],
   };
 }
 
 module.exports = {
+  ACTIVE_UPSTREAM_MODES,
   DEFAULT_PASSWORD,
   DEFAULT_USER_KEY,
   RELAY_USERS,
@@ -359,6 +462,7 @@ module.exports = {
   USER_KEYS,
   accountFile,
   getActiveUpstreamId,
+  getActiveUpstreamRuntime,
   getDisplayOrigin,
   getRelayToken,
   getUpstreamConfig,

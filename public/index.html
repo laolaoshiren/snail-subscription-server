@@ -194,15 +194,23 @@
 
           <section id="upstreamsTab" class="tab-panel hidden">
             <div class="workspace workspace-upstreams">
-              <section class="panel upstream-overview-panel">
+              <section class="panel upstream-list-panel">
                 <div class="panel-head compact-head">
-                  <h2>当前上游概览</h2>
-                  <p>先在顶部选择上游，这里再集中查看和管理当前上游的所有策略与连接参数。</p>
+                  <h2>上游列表</h2>
+                  <p>按当前名称排序显示。点击切换右侧详情，拖动顺序会自动保存，并影响轮询模式的尝试顺序。</p>
+                </div>
+                <div id="upstreamList" class="upstream-list"></div>
+              </section>
+
+              <section class="panel upstream-form-panel">
+                <div class="panel-head compact-head">
+                  <h2>上游详情</h2>
+                  <p>这里仅修改所选上游的配置。顶部“当前运行上游”仍负责控制单上游或轮询模式。</p>
                 </div>
 
-                <div class="overview-stack">
+                <div class="overview-stack upstream-detail-summary">
                   <div class="context-card">
-                    <span>运行中的上游</span>
+                    <span>当前详情上游</span>
                     <strong id="upstreamOverviewName">主上游</strong>
                   </div>
                   <div class="context-card">
@@ -221,13 +229,6 @@
                     <span>说明</span>
                     <strong id="upstreamOverviewDescription">当前上游信息暂未加载。</strong>
                   </div>
-                </div>
-              </section>
-
-              <section class="panel upstream-form-panel">
-                <div class="panel-head compact-head">
-                  <h2>当前上游配置</h2>
-                  <p>这些配置全部只作用于当前上游，不会改变下游固定订阅链接。</p>
                 </div>
 
                 <form id="upstreamForm" class="stack-form upstream-form">
