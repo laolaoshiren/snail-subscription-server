@@ -967,7 +967,7 @@ async function handleStartAppUpdate(response) {
     restartRequired: Boolean(result.restartRequired),
   });
 
-  if (result.restartRequired) {
+  if (result.restartRequired && result.shouldExitCurrentProcess) {
     scheduleProcessRestart();
     setTimeout(() => {
       server.close(() => {

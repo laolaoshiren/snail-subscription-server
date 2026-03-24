@@ -18,11 +18,37 @@ const execFileAsync = promisify(execFile);
 const packageFile = path.join(repoRoot, "package.json");
 const APP_CHECK_TTL_MS = 1000 * 60 * 2;
 const CLOUD_CHECK_TTL_MS = 1000 * 60 * 2;
+const DEFAULT_DOCKER_SOCKET_PATH = trimGitRefValue(process.env.SNAIL_DOCKER_SOCKET_PATH || "/var/run/docker.sock") || "/var/run/docker.sock";
+const DEFAULT_DOCKER_COMMAND = trimGitRefValue(process.env.SNAIL_DOCKER_COMMAND || "docker") || "docker";
 const DEFAULT_UPDATE_REPO_OWNER = trimGitRefValue(process.env.SNAIL_UPDATE_REPO_OWNER || "laolaoshiren") || "laolaoshiren";
 const DEFAULT_UPDATE_REPO_NAME =
   trimGitRefValue(process.env.SNAIL_UPDATE_REPO_NAME || "snail-subscription-server") ||
   "snail-subscription-server";
 const DEFAULT_UPDATE_BRANCH = trimGitRefValue(process.env.SNAIL_UPDATE_BRANCH || "main") || "main";
+const DOCKER_UPDATE_ENV_KEYS = Object.freeze([
+  "PORT",
+  "HOST",
+  "PROXY_URL",
+  "INVITE_CODE",
+  "ALLOW_INSECURE_TLS",
+  "RELAY_FETCH_TIMEOUT_MS",
+  "MAX_RETRIES",
+  "RETRY_DELAY_MS",
+  "FETCH_TIMEOUT_MS",
+  "PUBLIC_ORIGIN",
+  "SNAIL_DATA_DIR",
+  "ACCOUNT_DATA_DIR",
+  "SNAIL_UPDATE_MODE",
+  "SNAIL_DOCKER_CONTAINER_NAME",
+  "SNAIL_DOCKER_IMAGE",
+  "SNAIL_DOCKER_HOST_DATA_DIR",
+  "SNAIL_DOCKER_SOCKET_PATH",
+  "SNAIL_DOCKER_COMMAND",
+  "SNAIL_DOCKER_COMMAND_ARGS",
+  "SNAIL_UPDATE_REPO_OWNER",
+  "SNAIL_UPDATE_REPO_NAME",
+  "SNAIL_UPDATE_BRANCH",
+]);
 
 const cacheState = {
   localInfo: null,
@@ -95,6 +121,24 @@ function trimGitRefValue(value) {
   return (value || "").toString().trim();
 }
 
+function parseCommandArgs(value) {
+  const rawValue = trimGitRefValue(value);
+  if (!rawValue) {
+    return [];
+  }
+
+  try {
+    const parsed = JSON.parse(rawValue);
+    if (Array.isArray(parsed)) {
+      return parsed.map((item) => item.toString());
+    }
+  } catch (error) {
+    // Fall through to simple tokenization.
+  }
+
+  return rawValue.split(/\s+/).filter(Boolean);
+}
+
 function formatRemoteLabel(remoteUrl, fallback = "") {
   const trimmed = trimGitRefValue(remoteUrl);
   if (!trimmed) {
@@ -135,6 +179,42 @@ function getReadonlyUpdateContext() {
   };
 }
 
+function getDockerUpdateContext() {
+  return {
+    mode: trimGitRefValue(process.env.SNAIL_UPDATE_MODE || ""),
+    command: DEFAULT_DOCKER_COMMAND,
+    commandArgs: parseCommandArgs(process.env.SNAIL_DOCKER_COMMAND_ARGS || ""),
+    image: trimGitRefValue(process.env.SNAIL_DOCKER_IMAGE || ""),
+    containerName: trimGitRefValue(process.env.SNAIL_DOCKER_CONTAINER_NAME || ""),
+    hostDataDir:
+      trimGitRefValue(process.env.SNAIL_DOCKER_HOST_DATA_DIR || "") ||
+      trimGitRefValue(process.env.SNAIL_DATA_DIR || process.env.ACCOUNT_DATA_DIR || ""),
+    socketPath: DEFAULT_DOCKER_SOCKET_PATH,
+    port: trimGitRefValue(process.env.PORT || ""),
+  };
+}
+
+async function canUseDockerSelfUpdate() {
+  const context = getDockerUpdateContext();
+  if (
+    context.mode !== "docker" ||
+    !context.image ||
+    !context.containerName ||
+    !context.hostDataDir ||
+    !context.port ||
+    !fs.existsSync(context.socketPath)
+  ) {
+    return false;
+  }
+
+  try {
+    await runCommand(context.command, [...context.commandArgs, "version"]);
+    return true;
+  } catch (error) {
+    return false;
+  }
+}
+
 async function fetchJsonWithHeaders(url, headers = {}) {
   const response = await fetch(url, {
     headers: {
@@ -167,6 +247,7 @@ async function fetchReadonlyRemoteCommit(context) {
 function buildDefaultAppStatus(localInfo, systemState) {
   return {
     supported: true,
+    mode: "git",
     checking: false,
     updating: Boolean(systemState?.appUpdate?.updating),
     checkedAt: systemState?.appUpdate?.lastCheckedAt || "",
@@ -337,10 +418,13 @@ async function buildAppUpdateStatus(force = false) {
     fallback = buildDefaultAppStatus(localInfo, systemState);
   } catch (error) {
     localInfo = await getReadonlyLocalInfo(force);
+    const dockerSupported = await canUseDockerSelfUpdate();
+    const readonlyMode = dockerSupported ? "docker" : "readonly";
     fallback = {
-      supported: false,
+      supported: dockerSupported,
+      mode: readonlyMode,
       checking: false,
-      updating: false,
+      updating: Boolean(systemState?.appUpdate?.updating),
       checkedAt: systemState?.appUpdate?.lastCheckedAt || "",
       lastUpdatedAt: systemState?.appUpdate?.lastUpdatedAt || "",
       lastError: "",
@@ -364,7 +448,7 @@ async function buildAppUpdateStatus(force = false) {
       latestVersion: systemState?.appUpdate?.latestVersion || localInfo.version || "0.0.0",
       latestCommitSha: systemState?.appUpdate?.latestCommitSha || "",
       updateAvailable: Boolean(systemState?.appUpdate?.updateAvailable),
-      canFastForward: false,
+      canFastForward: dockerSupported,
       hasLocalChanges: false,
       commitsAhead: 0,
       commitsBehind: 0,
@@ -398,8 +482,8 @@ async function buildAppUpdateStatus(force = false) {
       cacheState.appStatusAt = Date.now();
       await updateSystemState({
         appUpdate: {
-          supported: false,
-          mode: "readonly",
+          supported: dockerSupported,
+          mode: readonlyMode,
           currentVersion: payload.currentVersion,
           currentCommitSha: payload.currentCommitSha,
           latestVersion: payload.latestVersion,
@@ -421,8 +505,8 @@ async function buildAppUpdateStatus(force = false) {
       cacheState.appStatusAt = Date.now();
       await updateSystemState({
         appUpdate: {
-          supported: false,
-          mode: "readonly",
+          supported: dockerSupported,
+          mode: readonlyMode,
           currentVersion: payload.currentVersion,
           currentCommitSha: payload.currentCommitSha,
           latestVersion: payload.latestVersion,
@@ -464,6 +548,7 @@ async function buildAppUpdateStatus(force = false) {
 
     const payload = {
       supported: true,
+      mode: "git",
       checking: false,
       updating: Boolean(systemState.appUpdate.updating),
       checkedAt,
@@ -551,6 +636,84 @@ async function runNpmInstall() {
   await runCommand(npmCommand, args);
 }
 
+function collectDockerUpdateEnvEntries() {
+  return DOCKER_UPDATE_ENV_KEYS.map((key) => [key, trimGitRefValue(process.env[key] || "")]).filter(
+    ([, value]) => Boolean(value),
+  );
+}
+
+function buildDockerHelperContainerName(containerName) {
+  return `${containerName}-updater-${Date.now()}`;
+}
+
+function buildDockerHelperRunArgs(context) {
+  const helperName = buildDockerHelperContainerName(context.containerName);
+  const args = [
+    "run",
+    "--rm",
+    "-d",
+    "--name",
+    helperName,
+    "-v",
+    `${context.socketPath}:${context.socketPath}`,
+    "-v",
+    `${context.hostDataDir}:/host-data`,
+  ];
+
+  collectDockerUpdateEnvEntries().forEach(([key, value]) => {
+    args.push("-e", `${key}=${value}`);
+  });
+
+  args.push("--entrypoint", "node", context.image);
+  args.push("scripts/docker-self-update.js");
+  return args;
+}
+
+async function runDockerSelfUpdate(status) {
+  const context = getDockerUpdateContext();
+  if (!(await canUseDockerSelfUpdate())) {
+    throw new Error("Docker online update is not available in the current deployment.");
+  }
+
+  await updateSystemState({
+    appUpdate: {
+      supported: true,
+      mode: "docker",
+      updating: true,
+      updateAvailable: false,
+      lastError: "",
+    },
+  });
+
+  try {
+    await runCommand(context.command, [...context.commandArgs, "pull", context.image]);
+    await runCommand(context.command, [...context.commandArgs, ...buildDockerHelperRunArgs(context)]);
+    invalidateCaches();
+
+    return {
+      updated: true,
+      restartRequired: true,
+      shouldExitCurrentProcess: false,
+      status: {
+        ...status,
+        supported: true,
+        mode: "docker",
+        updating: true,
+        updateAvailable: false,
+        lastError: "",
+      },
+    };
+  } catch (error) {
+    await updateSystemState({
+      appUpdate: {
+        updating: false,
+        lastError: error.message,
+      },
+    });
+    throw error;
+  }
+}
+
 async function runSystemUpdate() {
   if (cacheState.updatePromise) {
     return cacheState.updatePromise;
@@ -570,8 +733,13 @@ async function runSystemUpdate() {
       return {
         updated: false,
         restartRequired: false,
+        shouldExitCurrentProcess: false,
         status,
       };
+    }
+
+    if (status.mode === "docker") {
+      return runDockerSelfUpdate(status);
     }
 
     if (!status.canFastForward) {
@@ -606,6 +774,7 @@ async function runSystemUpdate() {
       return {
         updated: true,
         restartRequired: true,
+        shouldExitCurrentProcess: true,
         status: nextStatus,
       };
     } catch (error) {

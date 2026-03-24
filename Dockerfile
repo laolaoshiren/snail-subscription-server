@@ -7,6 +7,8 @@ ARG SNAIL_BUILD_COMMIT=""
 ENV NODE_ENV=production \
     SNAIL_BUILD_COMMIT=${SNAIL_BUILD_COMMIT}
 
+RUN apk add --no-cache docker-cli
+
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev --no-fund --no-audit
 

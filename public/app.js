@@ -1060,6 +1060,7 @@ function syncSystemForm() {
 
 function renderAppUpdateStatus() {
   const status = state.appUpdate || {};
+  const isDockerUpdate = status.mode === "docker";
   const currentVersionText = status.currentVersion
     ? `${status.currentVersion}${status.currentCommitSha ? ` · ${formatCommit(status.currentCommitSha)}` : ""}`
     : "暂无";
@@ -1072,7 +1073,7 @@ function renderAppUpdateStatus() {
 
   if (status.updating) {
     stateText = "更新中";
-    summary = "更新任务已启动，完成后会自动重启服务。";
+    summary = isDockerUpdate ? "正在拉取新镜像并重建容器。" : "更新任务已启动，完成后会自动重启服务。";
   } else if (status.checking) {
     stateText = "检查中";
     summary = "正在检查 GitHub 上的最新版本。";
@@ -1084,10 +1085,10 @@ function renderAppUpdateStatus() {
     summary = status.lastError;
   } else if (status.updateAvailable) {
     stateText = "发现更新";
-    summary = "检测到新版本，手动确认后才会开始更新。";
+    summary = isDockerUpdate ? "检测到新镜像，点击后会自动拉取并重建容器。" : "检测到新版本，手动确认后才会开始更新。";
   } else if (status.currentVersion) {
     stateText = "已是最新";
-    summary = "当前程序已经是最新版本。";
+    summary = isDockerUpdate ? "当前 Docker 部署已经是最新版本。" : "当前程序已经是最新版本。";
   }
 
   setText(appCurrentVersion, currentVersionText);

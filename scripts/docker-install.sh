@@ -370,8 +370,17 @@ replace_container() {
     --name "${CONTAINER_NAME}" \
     --restart unless-stopped \
     --env-file "${ENV_FILE}" \
+    -e SNAIL_UPDATE_MODE=docker \
+    -e SNAIL_DOCKER_CONTAINER_NAME="${CONTAINER_NAME}" \
+    -e SNAIL_DOCKER_IMAGE="${IMAGE_NAME}" \
+    -e SNAIL_DOCKER_HOST_DATA_DIR="${DATA_DIR}" \
+    -e SNAIL_DOCKER_SOCKET_PATH=/var/run/docker.sock \
+    -e SNAIL_UPDATE_REPO_OWNER=laolaoshiren \
+    -e SNAIL_UPDATE_REPO_NAME=snail-subscription-server \
+    -e SNAIL_UPDATE_BRANCH=main \
     -p "${PORT_INPUT}:${PORT_INPUT}" \
     -v "${DATA_DIR}:/app/data" \
+    -v /var/run/docker.sock:/var/run/docker.sock \
     "${IMAGE_NAME}" >/dev/null
 }
 
