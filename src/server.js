@@ -185,6 +185,19 @@ function normalizeType(input) {
   return value || "full";
 }
 
+function normalizeSubscriptionUpdateIntervalMinutes(rawValue, fallback = 30) {
+  const parsed = Number.parseInt(rawValue || `${fallback}`, 10);
+  if (!Number.isFinite(parsed) || parsed < 1) {
+    return fallback;
+  }
+
+  return parsed;
+}
+
+function toProfileUpdateIntervalHours(minutes) {
+  return String(Math.max(1, Math.ceil(minutes / 60)));
+}
+
 function sanitizeRegistration(record) {
   if (!record) {
     return null;
@@ -649,9 +662,11 @@ async function proxySubscription(response, request, type, url) {
   );
   const latest = userState.latestRegistration;
   const upstreamUrl = latest?.clientUrls?.[type];
-  const subscriptionUpdateIntervalMinutes = Math.max(
-    1,
-    Number.parseInt(upstreamConfig?.subscriptionUpdateIntervalMinutes || "30", 10) || 30,
+  const subscriptionUpdateIntervalMinutes = normalizeSubscriptionUpdateIntervalMinutes(
+    upstreamConfig?.subscriptionUpdateIntervalMinutes,
+  );
+  const profileUpdateIntervalHours = toProfileUpdateIntervalHours(
+    subscriptionUpdateIntervalMinutes,
   );
 
   if (!upstreamUrl) {
@@ -684,7 +699,7 @@ async function proxySubscription(response, request, type, url) {
       ].join("\n"),
       {
         "profile-title": `Snail Mock ${type}`,
-        "profile-update-interval": String(subscriptionUpdateIntervalMinutes),
+        "profile-update-interval": profileUpdateIntervalHours,
       },
     );
     return;
@@ -745,11 +760,12 @@ async function proxySubscription(response, request, type, url) {
 
   const headers = {};
   upstreamResponse.headers.forEach((value, key) => {
-    if (FORWARDED_HEADERS.has(key.toLowerCase())) {
-      headers[key] = value;
+    const normalizedKey = key.toLowerCase();
+    if (FORWARDED_HEADERS.has(normalizedKey)) {
+      headers[normalizedKey] = value;
     }
   });
-  headers["profile-update-interval"] = String(subscriptionUpdateIntervalMinutes);
+  headers["profile-update-interval"] = profileUpdateIntervalHours;
 
   const body = Buffer.from(await upstreamResponse.arrayBuffer());
   response.writeHead(200, headers);
