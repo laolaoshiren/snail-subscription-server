@@ -23,6 +23,7 @@ const saveUpstreamCloudButton = document.querySelector("#saveUpstreamCloudButton
 const statusBar = document.querySelector("#statusBar");
 const linksList = document.querySelector("#linksList");
 const emptyState = document.querySelector("#emptyState");
+const copyToast = document.querySelector("#copyToast");
 const qrModal = document.querySelector("#qrModal");
 const qrModalTitle = document.querySelector("#qrModalTitle");
 const qrModalImage = document.querySelector("#qrModalImage");
@@ -127,6 +128,7 @@ const state = {
 };
 let draggingUpstreamId = "";
 let qrModalRequestToken = 0;
+let copyToastTimer = 0;
 
 async function copyText(value) {
   if (navigator.clipboard && window.isSecureContext) {
@@ -161,6 +163,36 @@ function clearStatus() {
 
   statusBar.className = "status-bar hidden";
   statusBar.textContent = "";
+}
+
+function hideCopyToast() {
+  if (!copyToast) {
+    return;
+  }
+
+  window.clearTimeout(copyToastTimer);
+  copyToastTimer = 0;
+  copyToast.classList.remove("toast-visible");
+  copyToast.setAttribute("aria-hidden", "true");
+}
+
+function showCopyToast(message, tone = "success") {
+  if (!copyToast) {
+    return;
+  }
+
+  window.clearTimeout(copyToastTimer);
+  copyToast.textContent = message;
+  copyToast.className = `toast toast-${tone}`;
+  copyToast.setAttribute("aria-hidden", "false");
+
+  window.requestAnimationFrame(() => {
+    copyToast.classList.add("toast-visible");
+  });
+
+  copyToastTimer = window.setTimeout(() => {
+    hideCopyToast();
+  }, 1800);
 }
 
 function renderLoginHint() {
@@ -727,7 +759,7 @@ function renderLinks(relayUrls, upstream = getActiveUpstream()) {
       }
 
       await copyText(url);
-      setStatus(`${label} 链接已复制。`, "success");
+      showCopyToast(`${label} 链接已复制。`);
     });
 
     const qrButton = document.createElement("button");
@@ -1869,6 +1901,7 @@ if (syncUpstreamCloudButton) {
 if (logoutButton) {
   logoutButton.addEventListener("click", async () => {
     closeQrModal();
+    hideCopyToast();
     clearStatus();
 
     try {
