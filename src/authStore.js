@@ -8,6 +8,7 @@ const { dataDir } = require("./dataPaths");
 const { getDefaultUpstreamId, getUpstreamModule, listUpstreamModules } = require("./upstreams/core/registry");
 
 const accountFile = path.join(dataDir, "account.json");
+const relayTokensFile = path.join(dataDir, "relay-tokens.json");
 const DEFAULT_PASSWORD = "admin";
 const USER_KEYS = Object.freeze(["userA", "userB", "userC", "userD", "userE"]);
 const USER_LABELS = Object.freeze({
@@ -263,15 +264,70 @@ async function saveSecurityState(state) {
   const normalizedState = normalizePanelState(state);
   await fs.mkdir(dataDir, { recursive: true });
   await fs.writeFile(accountFile, JSON.stringify(normalizedState, null, 2), "utf8");
+  await fs.writeFile(relayTokensFile, JSON.stringify(normalizedState.relayTokens, null, 2), "utf8");
+}
+
+async function loadRelayTokenBackup() {
+  try {
+    const content = await fs.readFile(relayTokensFile, "utf8");
+    return normalizeRelayTokens(JSON.parse(content));
+  } catch (error) {
+    if (error.code === "ENOENT") {
+      return null;
+    }
+
+    throw error;
+  }
+}
+
+function hasStoredRelayTokens(rawState = {}) {
+  if (rawState.relayToken) {
+    return true;
+  }
+
+  if (!rawState.relayTokens || typeof rawState.relayTokens !== "object") {
+    return false;
+  }
+
+  return Object.values(rawState.relayTokens).some((value) => typeof value === "string" && value.trim());
+}
+
+function mergeRelayTokens(state, backupTokens, options = {}) {
+  if (!backupTokens) {
+    return state;
+  }
+
+  const mergedSource = options.preferBackup
+    ? {
+        ...(state?.relayTokens || {}),
+        ...backupTokens,
+      }
+    : {
+        ...backupTokens,
+        ...(state?.relayTokens || {}),
+      };
+
+  const nextRelayTokens = normalizeRelayTokens({
+    ...mergedSource,
+  });
+
+  return {
+    ...state,
+    relayTokens: nextRelayTokens,
+  };
 }
 
 async function loadSecurityState() {
+  const relayTokenBackup = await loadRelayTokenBackup();
+
   try {
     const content = await fs.readFile(accountFile, "utf8");
     const parsed = JSON.parse(content);
-    const normalizedState = normalizePanelState(parsed);
+    const normalizedState = mergeRelayTokens(normalizePanelState(parsed), relayTokenBackup, {
+      preferBackup: !hasStoredRelayTokens(parsed),
+    });
 
-    if (JSON.stringify(parsed) !== JSON.stringify(normalizedState)) {
+    if (JSON.stringify(parsed) !== JSON.stringify(normalizedState) || !relayTokenBackup) {
       await saveSecurityState(normalizedState);
     }
 
@@ -283,6 +339,7 @@ async function loadSecurityState() {
 
     const defaultState = createSecurityState(DEFAULT_PASSWORD, {
       activeUpstreamId: getDefaultUpstreamId(),
+      relayTokens: relayTokenBackup || undefined,
     });
     await saveSecurityState(defaultState);
     return defaultState;
@@ -532,6 +589,7 @@ module.exports = {
   normalizeDisplayOrigin,
   normalizeUserKey,
   resolveRelayUserByToken,
+  relayTokensFile,
   isDefaultPasswordActive,
   updatePanelSettings,
   updatePassword,
