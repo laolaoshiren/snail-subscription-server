@@ -299,6 +299,11 @@ async function verifyPasswordLogin(password) {
   };
 }
 
+async function isDefaultPasswordActive() {
+  const state = await loadSecurityState();
+  return safeCompare(hashPassword(DEFAULT_PASSWORD, state.passwordSalt), state.passwordHash);
+}
+
 async function updatePassword({ currentPassword, newPassword }) {
   const state = await loadSecurityState();
   const valid = safeCompare(hashPassword(currentPassword, state.passwordSalt), state.passwordHash);
@@ -527,6 +532,7 @@ module.exports = {
   normalizeDisplayOrigin,
   normalizeUserKey,
   resolveRelayUserByToken,
+  isDefaultPasswordActive,
   updatePanelSettings,
   updatePassword,
   verifyPasswordLogin,

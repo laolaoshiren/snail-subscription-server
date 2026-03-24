@@ -5,6 +5,7 @@ const dashboardView = document.querySelector("#dashboardView");
 const loginForm = document.querySelector("#loginForm");
 const loginUsername = document.querySelector("#loginUsername");
 const loginPassword = document.querySelector("#loginPassword");
+const loginHint = document.querySelector("#loginHint");
 const registerForm = document.querySelector("#registerForm");
 const upstreamForm = document.querySelector("#upstreamForm");
 const systemForm = document.querySelector("#systemForm");
@@ -112,6 +113,8 @@ const state = {
   currentTab: "subscription",
   appUpdate: null,
   upstreamCloud: null,
+  passwordIsDefault: false,
+  defaultPassword: "",
   announcedUpdateKey: "",
   updateReconnectTimer: null,
 };
@@ -150,6 +153,21 @@ function clearStatus() {
 
   statusBar.className = "status-bar hidden";
   statusBar.textContent = "";
+}
+
+function renderLoginHint() {
+  if (!loginHint || !loginPassword) {
+    return;
+  }
+
+  if (state.passwordIsDefault && state.defaultPassword) {
+    loginHint.innerHTML = `默认密码是 <code>${state.defaultPassword}</code>`;
+    loginPassword.placeholder = `默认 ${state.defaultPassword}`;
+    return;
+  }
+
+  loginHint.textContent = "请输入你设置的面板密码。";
+  loginPassword.placeholder = "请输入面板密码";
 }
 
 function toggleHidden(element, hidden) {
@@ -1196,6 +1214,8 @@ function renderUpstreamSwitcher() {
 }
 
 function applySession(payload) {
+  state.passwordIsDefault = Boolean(payload.passwordIsDefault);
+  state.defaultPassword = (payload.defaultPassword || "").toString();
   state.displayOrigin = payload.displayOrigin || "";
   state.users = Array.isArray(payload.users) ? payload.users : [];
   state.upstreams = Array.isArray(payload.upstreams) ? payload.upstreams : [];
@@ -1223,6 +1243,7 @@ function applySession(payload) {
   renderAppUpdateStatus();
   syncUpstreamCloudForm();
   announceAvailableUpdate();
+  renderLoginHint();
 }
 
 function applyUserPayload(payload) {
@@ -1275,6 +1296,9 @@ async function refreshSession() {
     const payload = await requestJson("/api/session", { method: "GET" });
 
     if (!payload.authenticated) {
+      state.passwordIsDefault = Boolean(payload.passwordIsDefault);
+      state.defaultPassword = (payload.defaultPassword || "").toString();
+      renderLoginHint();
       showLogin();
       clearStatus();
       return;
@@ -1347,12 +1371,24 @@ if (loginForm) {
       setStatus("登录成功。", "success");
       await refreshSession();
     } catch (error) {
+      if (error.status === 401) {
+        setStatus(
+          state.passwordIsDefault
+            ? "默认密码不正确，请重试。"
+            : "面板密码错误，请确认你设置的密码。",
+          "error",
+        );
+        return;
+      }
+
       setStatus(error.message, "error");
     } finally {
       setLoading(loginButton, "登录中...", false);
     }
   });
 }
+
+renderLoginHint();
 
 if (registerForm) {
   registerForm.addEventListener("submit", async (event) => {

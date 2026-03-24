@@ -4,6 +4,7 @@ set -euo pipefail
 APP_NAME="${APP_NAME:-snail-subscription-server}"
 APP_USER="${APP_USER:-snailrelay}"
 APP_DIR="${APP_DIR:-/opt/${APP_NAME}}"
+DATA_DIR="${DATA_DIR:-${APP_DIR}/data}"
 REPO_URL="${REPO_URL:-https://github.com/laolaoshiren/snail-subscription-server.git}"
 SERVICE_NAME="${SERVICE_NAME:-${APP_NAME}}"
 ENV_FILE="${ENV_FILE:-/etc/${APP_NAME}.env}"
@@ -29,6 +30,7 @@ CURRENT_MAX_RETRIES=""
 CURRENT_RETRY_DELAY_MS=""
 CURRENT_FETCH_TIMEOUT_MS=""
 CURRENT_PUBLIC_ORIGIN=""
+CURRENT_DATA_DIR=""
 PANEL_PASSWORD_RESULT=""
 PASSWORD_CHANGED="0"
 BACKUP_DIR=""
@@ -109,6 +111,11 @@ load_existing_env() {
   CURRENT_RETRY_DELAY_MS="$(awk -F= '$1=="RETRY_DELAY_MS" {print substr($0, index($0, "=") + 1); exit}' "${ENV_FILE}")"
   CURRENT_FETCH_TIMEOUT_MS="$(awk -F= '$1=="FETCH_TIMEOUT_MS" {print substr($0, index($0, "=") + 1); exit}' "${ENV_FILE}")"
   CURRENT_PUBLIC_ORIGIN="$(awk -F= '$1=="PUBLIC_ORIGIN" {print substr($0, index($0, "=") + 1); exit}' "${ENV_FILE}")"
+  CURRENT_DATA_DIR="$(awk -F= '$1=="SNAIL_DATA_DIR" {print substr($0, index($0, "=") + 1); exit}' "${ENV_FILE}")"
+
+  if [ -n "${CURRENT_DATA_DIR}" ] && [ "${DATA_DIR}" = "${APP_DIR}/data" ]; then
+    DATA_DIR="${CURRENT_DATA_DIR}"
+  fi
 }
 
 install_base_packages() {
@@ -358,8 +365,9 @@ sync_repository() {
 }
 
 install_dependencies() {
-  mkdir -p "${APP_DIR}/data"
+  mkdir -p "${DATA_DIR}"
   chown -R "${APP_USER}:${APP_USER}" "${APP_DIR}"
+  chown -R "${APP_USER}:${APP_USER}" "${DATA_DIR}"
   su -s /bin/bash -c "cd '${APP_DIR}' && npm ci --omit=dev --no-fund --no-audit" "${APP_USER}"
 }
 
@@ -369,8 +377,9 @@ restore_backup_data() {
   fi
 
   log "恢复旧目录中的 data 数据"
-  cp -a "${BACKUP_DIR}/data/." "${APP_DIR}/data/"
-  chown -R "${APP_USER}:${APP_USER}" "${APP_DIR}/data"
+  mkdir -p "${DATA_DIR}"
+  cp -a "${BACKUP_DIR}/data/." "${DATA_DIR}/"
+  chown -R "${APP_USER}:${APP_USER}" "${DATA_DIR}"
 }
 
 write_env_file() {
@@ -388,6 +397,7 @@ MAX_RETRIES=${MAX_RETRIES}
 RETRY_DELAY_MS=${RETRY_DELAY_MS}
 FETCH_TIMEOUT_MS=${FETCH_TIMEOUT_MS}
 PUBLIC_ORIGIN=${public_origin}
+SNAIL_DATA_DIR=${DATA_DIR}
 EOF
 
   chmod 600 "${ENV_FILE}"
@@ -400,10 +410,10 @@ set_panel_password() {
 
   (
     cd "${APP_DIR}"
-    PANEL_PASSWORD="${PANEL_PASSWORD_RESULT}" node scripts/init-account.js >/dev/null
+    PANEL_PASSWORD="${PANEL_PASSWORD_RESULT}" SNAIL_DATA_DIR="${DATA_DIR}" node scripts/init-account.js >/dev/null
   )
 
-  chown "${APP_USER}:${APP_USER}" "${APP_DIR}/data/account.json"
+  chown "${APP_USER}:${APP_USER}" "${DATA_DIR}/account.json"
 }
 
 write_service() {
@@ -446,6 +456,7 @@ print_summary() {
   log "模式: ${INSTALL_MODE}"
   log "服务名: ${SERVICE_NAME}"
   log "项目目录: ${APP_DIR}"
+  log "数据目录: ${DATA_DIR}"
   log "环境文件: ${ENV_FILE}"
   if [ -n "${public_origin}" ]; then
     log "面板地址: ${public_origin}"

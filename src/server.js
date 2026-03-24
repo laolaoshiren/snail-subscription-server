@@ -18,6 +18,7 @@ const {
   getDisplayOrigin,
   getRelayToken,
   getUpstreamCloudConfig,
+  isDefaultPasswordActive,
   listRelayUsers,
   listUpstreamConfigs,
   normalizeUserKey,
@@ -795,11 +796,13 @@ async function handleLogout(request, response) {
 
 async function handleSession(request, response) {
   const session = getSession(request);
+  const passwordIsDefault = await isDefaultPasswordActive();
   if (!session) {
     sendJson(response, 200, {
       success: true,
       authenticated: false,
-      defaultPassword: DEFAULT_PASSWORD,
+      defaultPassword: passwordIsDefault ? DEFAULT_PASSWORD : "",
+      passwordIsDefault,
     });
     return;
   }
@@ -835,7 +838,8 @@ async function handleSession(request, response) {
   sendJson(response, 200, {
     success: true,
     authenticated: true,
-    defaultPassword: DEFAULT_PASSWORD,
+    defaultPassword: passwordIsDefault ? DEFAULT_PASSWORD : "",
+    passwordIsDefault,
     displayOrigin,
     activeUpstreamId,
     activeUpstreamMode,

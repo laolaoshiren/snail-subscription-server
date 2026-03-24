@@ -5,7 +5,10 @@ const fs = require("node:fs");
 const path = require("node:path");
 
 const password = (process.env.PANEL_PASSWORD || "").trim();
-const dataDir = process.env.ACCOUNT_DATA_DIR || path.join(__dirname, "..", "data");
+const dataDir =
+  process.env.ACCOUNT_DATA_DIR ||
+  process.env.SNAIL_DATA_DIR ||
+  path.join(__dirname, "..", "data");
 const accountFile = path.join(dataDir, "account.json");
 
 if (password.length < 4) {
@@ -46,4 +49,3 @@ fs.writeFileSync(
 );
 
 console.log(accountFile);
-

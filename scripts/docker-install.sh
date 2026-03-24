@@ -336,6 +336,7 @@ MAX_RETRIES=${MAX_RETRIES}
 RETRY_DELAY_MS=${RETRY_DELAY_MS}
 FETCH_TIMEOUT_MS=${FETCH_TIMEOUT_MS}
 PUBLIC_ORIGIN=${public_origin}
+SNAIL_DATA_DIR=/app/data
 EOF
 
   chmod 600 "${ENV_FILE}"
@@ -356,6 +357,7 @@ set_panel_password() {
     --entrypoint node \
     -e PANEL_PASSWORD="${PANEL_PASSWORD_RESULT}" \
     -e ACCOUNT_DATA_DIR=/work/data \
+    -e SNAIL_DATA_DIR=/work/data \
     -v "${DATA_DIR}:/work/data" \
     "${IMAGE_NAME}" \
     scripts/init-account.js >/dev/null
