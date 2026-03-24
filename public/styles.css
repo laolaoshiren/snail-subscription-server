@@ -362,7 +362,8 @@ small {
 }
 
 .workspace-upstreams {
-  grid-template-columns: 300px minmax(0, 1fr);
+  grid-template-columns: 1fr;
+  grid-template-rows: auto minmax(0, 1fr);
 }
 
 .workspace-system {
@@ -382,6 +383,18 @@ small {
   min-height: 0;
   overflow: auto;
   padding: 16px;
+}
+
+.upstream-cloud-panel {
+  padding: 16px;
+}
+
+.upstream-content-grid {
+  min-height: 0;
+  height: 100%;
+  display: grid;
+  grid-template-columns: 300px minmax(0, 1fr);
+  gap: 10px;
 }
 
 .compact-head p {
@@ -872,6 +885,10 @@ code {
   .workspace-logs,
   .workspace-upstreams,
   .workspace-system {
+    grid-template-columns: 1fr;
+  }
+
+  .upstream-content-grid {
     grid-template-columns: 1fr;
   }
 
