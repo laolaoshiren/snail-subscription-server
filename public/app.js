@@ -4,25 +4,29 @@ const loginView = document.querySelector("#loginView");
 const dashboardView = document.querySelector("#dashboardView");
 const loginForm = document.querySelector("#loginForm");
 const registerForm = document.querySelector("#registerForm");
+const upstreamForm = document.querySelector("#upstreamForm");
+const systemForm = document.querySelector("#systemForm");
 const passwordForm = document.querySelector("#passwordForm");
-const settingsForm = document.querySelector("#settingsForm");
 const logoutButton = document.querySelector("#logoutButton");
 const reloadUpstreamsButton = document.querySelector("#reloadUpstreamsButton");
+
 const statusBar = document.querySelector("#statusBar");
 const linksList = document.querySelector("#linksList");
 const emptyState = document.querySelector("#emptyState");
 const tabButtons = Array.from(document.querySelectorAll("[data-tab]"));
 const subscriptionTab = document.querySelector("#subscriptionTab");
 const logsTab = document.querySelector("#logsTab");
-const settingsTab = document.querySelector("#settingsTab");
-const sharedUpstreamPanel = document.querySelector("#sharedUpstreamPanel");
-const sharedUserPanel = document.querySelector("#sharedUserPanel");
+const upstreamsTab = document.querySelector("#upstreamsTab");
+const systemTab = document.querySelector("#systemTab");
+const userScopePanel = document.querySelector("#userScopePanel");
+
 const userSwitcher = document.querySelector("#userSwitcher");
 const upstreamSwitcher = document.querySelector("#upstreamSwitcher");
 const usageGrid = document.querySelector("#usageGrid");
 const usageEmptyState = document.querySelector("#usageEmptyState");
 const historyList = document.querySelector("#historyList");
 const historyEmptyState = document.querySelector("#historyEmptyState");
+const providerSettingsFields = document.querySelector("#providerSettingsFields");
 
 const metaEmail = document.querySelector("#metaEmail");
 const metaPassword = document.querySelector("#metaPassword");
@@ -31,21 +35,30 @@ const metaCreatedAt = document.querySelector("#metaCreatedAt");
 const metaAccountCreatedAt = document.querySelector("#metaAccountCreatedAt");
 const metaExpiredAt = document.querySelector("#metaExpiredAt");
 const metaUpstreamSite = document.querySelector("#metaUpstreamSite");
+
 const activeUserLabel = document.querySelector("#activeUserLabel");
 const activeUpstreamLabel = document.querySelector("#activeUpstreamLabel");
 const modeDescription = document.querySelector("#modeDescription");
-const settingsDescription = document.querySelector("#settingsDescription");
+
+const upstreamOverviewName = document.querySelector("#upstreamOverviewName");
+const upstreamOverviewModule = document.querySelector("#upstreamOverviewModule");
+const upstreamOverviewStatus = document.querySelector("#upstreamOverviewStatus");
+const upstreamOverviewRemark = document.querySelector("#upstreamOverviewRemark");
+const upstreamOverviewDescription = document.querySelector("#upstreamOverviewDescription");
+
 const displayOriginInput = document.querySelector("#displayOrigin");
+const upstreamNameInput = document.querySelector("#upstreamName");
+const upstreamRemarkInput = document.querySelector("#upstreamRemark");
 const upstreamEnabledInput = document.querySelector("#upstreamEnabled");
 const upstreamInviteCodeInput = document.querySelector("#upstreamInviteCode");
 const trafficThresholdInput = document.querySelector("#trafficThresholdPercent");
 const maxRegistrationAgeInput = document.querySelector("#maxRegistrationAgeMinutes");
-const providerSettingsFields = document.querySelector("#providerSettingsFields");
 
 const loginButton = document.querySelector("#loginButton");
 const registerButton = document.querySelector("#registerButton");
+const saveUpstreamButton = document.querySelector("#saveUpstreamButton");
+const saveSystemButton = document.querySelector("#saveSystemButton");
 const savePasswordButton = document.querySelector("#savePasswordButton");
-const saveSettingsButton = document.querySelector("#saveSettingsButton");
 
 const protocolLabels = {
   universal: "通用订阅",
@@ -101,12 +114,12 @@ function clearStatus() {
   statusBar.textContent = "";
 }
 
-function toggleHidden(element, shouldHide) {
+function toggleHidden(element, hidden) {
   if (!element || !element.classList) {
     return;
   }
 
-  element.classList.toggle("hidden", shouldHide);
+  element.classList.toggle("hidden", hidden);
 }
 
 function setText(element, value) {
@@ -158,9 +171,9 @@ async function requestJson(url, options = {}) {
   }
 
   if (!response.ok) {
-    const error = new Error(payload.error || "Request failed.");
-    error.status = response.status;
-    throw error;
+    const nextError = new Error(payload.error || "Request failed.");
+    nextError.status = response.status;
+    throw nextError;
   }
 
   return payload;
@@ -169,25 +182,13 @@ async function requestJson(url, options = {}) {
 function activateTab(tabName) {
   toggleHidden(subscriptionTab, tabName !== "subscription");
   toggleHidden(logsTab, tabName !== "logs");
-  toggleHidden(settingsTab, tabName !== "settings");
-  toggleHidden(sharedUserPanel, tabName === "settings");
+  toggleHidden(upstreamsTab, tabName !== "upstreams");
+  toggleHidden(systemTab, tabName !== "system");
+  toggleHidden(userScopePanel, !["subscription", "logs"].includes(tabName));
 
   tabButtons.forEach((button) => {
     button.classList.toggle("active", button.dataset.tab === tabName);
   });
-}
-
-function syncStickyOffsets() {
-  if (!sharedUserPanel) {
-    return;
-  }
-
-  if (!sharedUpstreamPanel || window.innerWidth <= 720) {
-    sharedUserPanel.style.top = "";
-    return;
-  }
-
-  sharedUserPanel.style.top = `${sharedUpstreamPanel.offsetHeight + 26}px`;
 }
 
 function showLogin() {
@@ -206,14 +207,19 @@ function getActiveUpstream() {
     state.upstreams.find((item) => item.id === state.activeUpstreamId) ||
     state.upstreams[0] || {
       id: state.activeUpstreamId,
-      label: "默认上游",
+      label: "主上游",
+      moduleLabel: "snail-default",
       description: "",
+      remark: "",
+      active: true,
       config: {
+        enabled: true,
+        name: "主上游",
+        remark: "",
         runtimeMode: "always_refresh",
         trafficThresholdPercent: 20,
-        maxRegistrationAgeMinutes: 0,
+        maxRegistrationAgeMinutes: 120,
         inviteCode: "",
-        enabled: true,
         settings: {},
       },
       settingFields: [],
@@ -221,10 +227,10 @@ function getActiveUpstream() {
   );
 }
 
-function findCurrentUser() {
+function getCurrentUser() {
   return state.users.find((user) => user.key === state.currentUserKey) || state.users[0] || {
-    key: state.currentUserKey,
-    label: "用户",
+    key: "userA",
+    label: "用户A",
   };
 }
 
@@ -269,25 +275,14 @@ function formatPercent(value) {
 function describeMode(upstream) {
   const config = upstream?.config || {};
   if (config.runtimeMode === "smart_usage") {
-    const ageText =
+    const ageRule =
       Number(config.maxRegistrationAgeMinutes) > 0
         ? `，或账号年龄超过 ${config.maxRegistrationAgeMinutes} 分钟`
         : "";
-    return `智能模式：仅在客户端拉取或管理查看时查询上游；当剩余流量低于 ${config.trafficThresholdPercent}%${ageText} 时重新注册。`;
+    return `智能模式：仅在客户端拉取或管理查看时查询上游；当剩余流量低于 ${config.trafficThresholdPercent}%${ageRule} 时重新注册。`;
   }
 
-  return "兼容模式：客户端每次拉取订阅都会直接重新注册上游账号，不做查询判断。";
-}
-
-function selectRuntimeMode(runtimeMode) {
-  if (!settingsForm) {
-    return;
-  }
-
-  const radio = settingsForm.querySelector(`input[name="runtimeMode"][value="${runtimeMode}"]`);
-  if (radio) {
-    radio.checked = true;
-  }
+  return "兼容模式：客户端每次拉取都会直接重新注册当前上游，不做查询判断。";
 }
 
 function fillMeta(registration) {
@@ -319,8 +314,8 @@ function renderLinks(relayUrls) {
 
   Object.entries(protocolLabels).forEach(([type, label]) => {
     const url = relayUrls[type];
-    const item = document.createElement("article");
-    item.className = "link-card";
+    const card = document.createElement("article");
+    card.className = "link-card";
 
     const head = document.createElement("div");
     head.className = "link-head";
@@ -332,8 +327,14 @@ function renderLinks(relayUrls) {
     input.readOnly = true;
     input.value = url || "";
 
+    const foot = document.createElement("div");
+    foot.className = "link-foot";
+
+    const hint = document.createElement("small");
+    hint.textContent = "固定链接，切换上游后仍保持不变";
+
     const button = document.createElement("button");
-    button.className = "ghost-button";
+    button.className = "ghost-button small-button";
     button.type = "button";
     button.textContent = "复制";
     button.addEventListener("click", async () => {
@@ -342,11 +343,12 @@ function renderLinks(relayUrls) {
       }
 
       await copyText(url);
-      setStatus(`${label} 链接已复制。`, "success");
+      setStatus(`${label} 固定订阅链接已复制。`, "success");
     });
 
-    item.append(head, input, button);
-    linksList.appendChild(item);
+    foot.append(hint, button);
+    card.append(head, input, foot);
+    linksList.appendChild(card);
   });
 }
 
@@ -364,7 +366,7 @@ function renderUsage(usage) {
 
   toggleHidden(usageEmptyState, true);
 
-  const cards = [
+  const rows = [
     ["最近查询", formatDateTime(usage.queriedAt)],
     ["套餐", usage.planName || "暂无"],
     ["总流量", formatBytes(usage.transferEnable)],
@@ -376,7 +378,7 @@ function renderUsage(usage) {
     ["最近登录", formatDateTime(usage.lastLoginAt)],
   ];
 
-  cards.forEach(([label, value]) => {
+  rows.forEach(([label, value]) => {
     const card = document.createElement("article");
     card.className = "usage-card";
     card.innerHTML = `<span>${label}</span><strong>${value}</strong>`;
@@ -401,10 +403,6 @@ function buildHistoryMeta(entry) {
     parts.push("手动操作");
   }
 
-  if (entry.relayType) {
-    parts.push(entry.relayType);
-  }
-
   if (entry.decision === "register") {
     parts.push("已重新注册");
   } else if (entry.decision === "reuse") {
@@ -412,7 +410,11 @@ function buildHistoryMeta(entry) {
   } else if (entry.decision === "low-traffic") {
     parts.push("流量不足");
   } else if (entry.decision === "expired") {
-    parts.push("达到续期时间");
+    parts.push("达到过期时间");
+  }
+
+  if (entry.relayType) {
+    parts.push(entry.relayType);
   }
 
   if (typeof entry.usage?.remainingPercent === "number") {
@@ -437,32 +439,100 @@ function renderHistory(history) {
   toggleHidden(historyEmptyState, true);
 
   history.forEach((entry) => {
-    const item = document.createElement("article");
-    item.className = "history-item";
+    const card = document.createElement("article");
+    card.className = "history-item";
 
     const metaText = buildHistoryMeta(entry);
-    const registrationTime = entry.registration?.createdAt
-      ? `注册时间：${formatDateTime(entry.registration.createdAt)}`
-      : "";
     const usageText =
       typeof entry.usage?.usedTotal === "number" && typeof entry.usage?.transferEnable === "number"
         ? `已用 ${formatBytes(entry.usage.usedTotal)} / 总量 ${formatBytes(entry.usage.transferEnable)}`
         : "";
+    const registrationText = entry.registration?.createdAt
+      ? `注册时间：${formatDateTime(entry.registration.createdAt)}`
+      : "";
 
-    item.innerHTML = `
+    card.innerHTML = `
       <div class="history-head">
         <strong>${entry.title || "状态更新"}</strong>
         <span>${formatDateTime(entry.timestamp)}</span>
       </div>
       <p>${entry.message || "暂无说明"}</p>
-      <div class="history-meta">${[metaText, registrationTime, usageText].filter(Boolean).join(" · ") || "暂无更多信息"}</div>
+      <div class="history-meta">${[metaText, usageText, registrationText].filter(Boolean).join(" · ") || "暂无更多信息"}</div>
     `;
-    historyList.appendChild(item);
+
+    historyList.appendChild(card);
   });
 }
 
+function renderUpstreamOverview(upstream) {
+  const config = upstream?.config || {};
+  setText(upstreamOverviewName, upstream?.label || "主上游");
+  setText(upstreamOverviewModule, upstream?.id || "snail-default");
+  setText(upstreamOverviewStatus, config.enabled === false ? "已停用" : "启用中");
+  setText(upstreamOverviewRemark, config.remark || upstream?.remark || "暂无备注");
+  setText(upstreamOverviewDescription, upstream?.description || "暂无说明");
+}
+
+function renderProviderSettingsFields(upstream) {
+  if (!providerSettingsFields) {
+    return;
+  }
+
+  providerSettingsFields.innerHTML = "";
+  const fields = Array.isArray(upstream?.settingFields) ? upstream.settingFields : [];
+  const providerSettings = upstream?.config?.settings || {};
+
+  fields.forEach((field) => {
+    const label = document.createElement("label");
+    label.className = "provider-field";
+
+    const title = document.createElement("span");
+    title.textContent = field.label || field.key;
+
+    const input = document.createElement("input");
+    input.type = "text";
+    input.name = `provider_${field.key}`;
+    input.dataset.providerKey = field.key;
+    input.placeholder = field.placeholder || "";
+    input.value = providerSettings[field.key] || "";
+
+    const description = document.createElement("small");
+    description.textContent = field.description || "";
+
+    label.append(title, input, description);
+    providerSettingsFields.appendChild(label);
+  });
+}
+
+function syncUpstreamForm() {
+  const upstream = getActiveUpstream();
+  const config = upstream.config || {};
+
+  setText(activeUpstreamLabel, upstream.label || "主上游");
+  setText(modeDescription, describeMode(upstream));
+  renderUpstreamOverview(upstream);
+
+  setInputValue(upstreamNameInput, config.name || upstream.label || "");
+  setInputValue(upstreamRemarkInput, config.remark || "");
+  setCheckboxValue(upstreamEnabledInput, config.enabled !== false);
+  setInputValue(upstreamInviteCodeInput, config.inviteCode || "");
+  setInputValue(trafficThresholdInput, config.trafficThresholdPercent ?? 20);
+  setInputValue(maxRegistrationAgeInput, config.maxRegistrationAgeMinutes ?? 120);
+
+  const radio = upstreamForm?.querySelector(`input[name="runtimeMode"][value="${config.runtimeMode || "always_refresh"}"]`);
+  if (radio) {
+    radio.checked = true;
+  }
+
+  renderProviderSettingsFields(upstream);
+}
+
+function syncSystemForm() {
+  setInputValue(displayOriginInput, state.displayOrigin || "");
+}
+
 function updateSummaryFromPayload(payload) {
-  const currentUser = findCurrentUser();
+  const currentUser = getCurrentUser();
   const nextSummary = {
     key: currentUser.key,
     label: currentUser.label,
@@ -512,13 +582,13 @@ function renderUserSwitcher() {
     const summary = state.userSummaries.find((item) => item.key === user.key);
     const button = document.createElement("button");
     button.type = "button";
-    button.className = `user-chip${user.key === state.currentUserKey ? " active" : ""}`;
+    button.className = `scope-chip${user.key === state.currentUserKey ? " active" : ""}`;
 
     let note = "未初始化";
     if (summary?.hasRegistration && typeof summary.remainingPercent === "number") {
       note = `剩余 ${summary.remainingPercent.toFixed(2)}%`;
     } else if (summary?.hasRegistration) {
-      note = "已注册";
+      note = "已有记录";
     }
 
     button.innerHTML = `<strong>${user.label}</strong><small>${note}</small>`;
@@ -538,13 +608,17 @@ function renderUserSwitcher() {
 
 async function switchActiveUpstream(upstreamId) {
   clearStatus();
+
   try {
     await requestJson("/api/settings", {
       method: "POST",
-      body: JSON.stringify({ activeUpstreamId: upstreamId }),
+      body: JSON.stringify({
+        activeUpstreamId: upstreamId,
+      }),
     });
+
     await refreshSession();
-    setStatus(`已切换到 ${getActiveUpstream().label}。`, "success");
+    setStatus(`已切换到 ${getActiveUpstream().label}。下游固定订阅链接不会变化。`, "success");
   } catch (error) {
     if (error.status === 401) {
       showLogin();
@@ -566,10 +640,9 @@ function renderUpstreamSwitcher() {
   state.upstreams.forEach((upstream) => {
     const button = document.createElement("button");
     button.type = "button";
-    button.className = `upstream-chip${upstream.id === state.activeUpstreamId ? " active" : ""}`;
+    button.className = `scope-chip${upstream.id === state.activeUpstreamId ? " active" : ""}`;
 
-    const modeText =
-      upstream.config?.runtimeMode === "smart_usage" ? "智能模式" : "兼容模式";
+    const modeText = upstream.config?.runtimeMode === "smart_usage" ? "智能模式" : "兼容模式";
     const statusText = upstream.config?.enabled === false ? "已停用" : modeText;
 
     button.innerHTML = `<strong>${upstream.label}</strong><small>${statusText}</small>`;
@@ -583,58 +656,6 @@ function renderUpstreamSwitcher() {
 
     upstreamSwitcher.appendChild(button);
   });
-
-  syncStickyOffsets();
-}
-
-function renderProviderSettingsFields(upstream) {
-  if (!providerSettingsFields) {
-    return;
-  }
-
-  providerSettingsFields.innerHTML = "";
-  const fields = Array.isArray(upstream?.settingFields) ? upstream.settingFields : [];
-  const providerSettings = upstream?.config?.settings || {};
-
-  fields.forEach((field) => {
-    const wrapper = document.createElement("label");
-    wrapper.className = "provider-field";
-    const title = document.createElement("span");
-    title.textContent = field.label || field.key;
-
-    const input = document.createElement("input");
-    input.type = "text";
-    input.name = `provider_${field.key}`;
-    input.dataset.providerKey = field.key;
-    input.placeholder = field.placeholder || "";
-    input.value = providerSettings[field.key] || "";
-
-    const description = document.createElement("small");
-    description.textContent = field.description || "";
-
-    wrapper.append(title, input, description);
-    providerSettingsFields.appendChild(wrapper);
-  });
-}
-
-function syncSettingsForm() {
-  const upstream = getActiveUpstream();
-  const config = upstream.config || {};
-
-  setText(activeUpstreamLabel, upstream.label || "默认上游");
-  setText(modeDescription, describeMode(upstream));
-  setText(
-    settingsDescription,
-    `${upstream.label || "当前上游"} 的设置会直接影响固定服务器中转链接的实际行为。`,
-  );
-
-  setInputValue(displayOriginInput, state.displayOrigin || "");
-  setCheckboxValue(upstreamEnabledInput, config.enabled !== false);
-  setInputValue(upstreamInviteCodeInput, config.inviteCode || "");
-  setInputValue(trafficThresholdInput, config.trafficThresholdPercent ?? 20);
-  setInputValue(maxRegistrationAgeInput, config.maxRegistrationAgeMinutes ?? 0);
-  selectRuntimeMode(config.runtimeMode || "always_refresh");
-  renderProviderSettingsFields(upstream);
 }
 
 function applySession(payload) {
@@ -645,28 +666,24 @@ function applySession(payload) {
   state.userSummaries = Array.isArray(payload.userSummaries) ? payload.userSummaries : [];
   state.activeUpstreamId = payload.activeUpstreamId || state.upstreams[0]?.id || "";
 
-  const hasCurrentUser = state.users.some((user) => user.key === state.currentUserKey);
-  if (!hasCurrentUser) {
+  if (!state.users.some((user) => user.key === state.currentUserKey)) {
     state.currentUserKey = payload.defaultUserKey || state.users[0]?.key || "userA";
   }
 
-  setText(activeUserLabel, findCurrentUser().label);
+  setText(activeUserLabel, getCurrentUser().label);
   renderUpstreamSwitcher();
   renderUserSwitcher();
-  syncSettingsForm();
+  syncUpstreamForm();
+  syncSystemForm();
 }
 
 function applyUserPayload(payload) {
   const upstream = payload.upstream || getActiveUpstream();
-  if (upstream?.id) {
-    state.activeUpstreamId = upstream.id;
-  }
-
   state.relayUrlsByUser[state.currentUserKey] =
-    payload.relayUrls || state.relayUrlsByUser[state.currentUserKey];
+    payload.relayUrls || state.relayUrlsByUser[state.currentUserKey] || {};
 
-  setText(activeUserLabel, payload.user?.label || findCurrentUser().label);
-  setText(activeUpstreamLabel, upstream?.label || getActiveUpstream().label);
+  setText(activeUserLabel, payload.user?.label || getCurrentUser().label);
+  setText(activeUpstreamLabel, upstream.label || getActiveUpstream().label);
   setText(modeDescription, describeMode(upstream));
 
   fillMeta(payload.registration);
@@ -678,14 +695,14 @@ function applyUserPayload(payload) {
 }
 
 async function loadUserState() {
-  const user = findCurrentUser();
-  setText(activeUserLabel, user.label);
+  setText(activeUserLabel, getCurrentUser().label);
   setText(activeUpstreamLabel, getActiveUpstream().label);
 
   try {
     const payload = await requestJson(
       `/api/subscriptions/latest?type=full&user=${encodeURIComponent(state.currentUserKey)}&upstreamId=${encodeURIComponent(state.activeUpstreamId)}`,
     );
+
     applyUserPayload(payload);
 
     if (payload.warning) {
@@ -769,7 +786,7 @@ if (registerForm) {
       });
 
       applyUserPayload(payload);
-      setStatus(`${findCurrentUser().label} 已在 ${getActiveUpstream().label} 下完成重新注册。`, "success");
+      setStatus(`当前用户已在 ${getActiveUpstream().label} 下完成重新注册。`, "success");
     } catch (error) {
       if (error.status === 401) {
         showLogin();
@@ -784,13 +801,13 @@ if (registerForm) {
   });
 }
 
-if (settingsForm) {
-  settingsForm.addEventListener("submit", async (event) => {
+if (upstreamForm) {
+  upstreamForm.addEventListener("submit", async (event) => {
     event.preventDefault();
     clearStatus();
-    setLoading(saveSettingsButton, "保存中...", true);
+    setLoading(saveUpstreamButton, "保存中...", true);
 
-    const formData = new FormData(settingsForm);
+    const formData = new FormData(upstreamForm);
     const providerSettings = {};
     Array.from(providerSettingsFields?.querySelectorAll("[data-provider-key]") || []).forEach((input) => {
       providerSettings[input.dataset.providerKey] = input.value.trim();
@@ -800,8 +817,9 @@ if (settingsForm) {
       await requestJson("/api/settings", {
         method: "POST",
         body: JSON.stringify({
-          displayOrigin: (formData.get("displayOrigin") || "").toString().trim(),
           upstreamId: state.activeUpstreamId,
+          name: (formData.get("name") || "").toString().trim(),
+          remark: (formData.get("remark") || "").toString().trim(),
           enabled: upstreamEnabledInput?.checked,
           inviteCode: (formData.get("inviteCode") || "").toString().trim(),
           runtimeMode: (formData.get("runtimeMode") || "").toString(),
@@ -812,7 +830,7 @@ if (settingsForm) {
       });
 
       await refreshSession();
-      setStatus("当前上游设置已更新。", "success");
+      setStatus("当前上游配置已更新。下游固定订阅链接未变化。", "success");
     } catch (error) {
       if (error.status === 401) {
         showLogin();
@@ -822,7 +840,39 @@ if (settingsForm) {
 
       setStatus(error.message, "error");
     } finally {
-      setLoading(saveSettingsButton, "保存中...", false);
+      setLoading(saveUpstreamButton, "保存中...", false);
+    }
+  });
+}
+
+if (systemForm) {
+  systemForm.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    clearStatus();
+    setLoading(saveSystemButton, "保存中...", true);
+
+    const formData = new FormData(systemForm);
+
+    try {
+      await requestJson("/api/settings", {
+        method: "POST",
+        body: JSON.stringify({
+          displayOrigin: (formData.get("displayOrigin") || "").toString().trim(),
+        }),
+      });
+
+      await refreshSession();
+      setStatus("系统设置已更新。", "success");
+    } catch (error) {
+      if (error.status === 401) {
+        showLogin();
+        setStatus("登录状态已失效，请重新输入密码。", "error");
+        return;
+      }
+
+      setStatus(error.message, "error");
+    } finally {
+      setLoading(saveSystemButton, "保存中...", false);
     }
   });
 }
@@ -907,10 +957,6 @@ tabButtons.forEach((button) => {
   button.addEventListener("click", () => {
     activateTab(button.dataset.tab);
   });
-});
-
-window.addEventListener("resize", () => {
-  syncStickyOffsets();
 });
 
 refreshSession();

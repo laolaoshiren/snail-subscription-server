@@ -281,7 +281,9 @@ function shapeRegistrationResponse(user, upstream, userState, type, relayUrls, w
       ? {
           id: upstream.id,
           label: upstream.label,
+          moduleLabel: upstream.moduleLabel || "",
           description: upstream.description || "",
+          remark: upstream.remark || "",
           settingFields: Array.isArray(upstream.settingFields) ? upstream.settingFields : [],
           config: upstream.config || null,
           active: Boolean(upstream.active),
@@ -538,6 +540,8 @@ async function handleUpdateSettings(request, response) {
     trafficThresholdPercent: body.trafficThresholdPercent,
     maxRegistrationAgeMinutes: body.maxRegistrationAgeMinutes,
     inviteCode: body.inviteCode,
+    name: body.name,
+    remark: body.remark,
     providerSettings: body.providerSettings,
     enabled: body.enabled,
   });

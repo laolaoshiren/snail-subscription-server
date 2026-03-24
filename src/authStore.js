@@ -276,8 +276,10 @@ async function listUpstreamConfigs() {
 
   return listUpstreamModules().map((module) => ({
     id: module.manifest.id,
-    label: module.manifest.label,
+    label: state.upstreams[module.manifest.id]?.name || module.manifest.label,
+    moduleLabel: module.manifest.label,
     description: module.manifest.description || "",
+    remark: state.upstreams[module.manifest.id]?.remark || "",
     settingFields: Array.isArray(module.manifest.settingFields) ? module.manifest.settingFields : [],
     config: state.upstreams[module.manifest.id],
     active: state.activeUpstreamId === module.manifest.id,
@@ -330,6 +332,8 @@ async function updatePanelSettings(settings = {}) {
           : settings.maxRegistrationAgeMinutes,
       inviteCode:
         settings.inviteCode === undefined ? currentConfig.inviteCode : settings.inviteCode,
+      name: settings.name === undefined ? currentConfig.name : settings.name,
+      remark: settings.remark === undefined ? currentConfig.remark : settings.remark,
       settings: {
         ...(currentConfig.settings || {}),
         ...(settings.providerSettings && typeof settings.providerSettings === "object"
