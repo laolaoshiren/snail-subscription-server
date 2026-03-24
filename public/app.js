@@ -3,6 +3,8 @@
 const loginView = document.querySelector("#loginView");
 const dashboardView = document.querySelector("#dashboardView");
 const loginForm = document.querySelector("#loginForm");
+const loginUsername = document.querySelector("#loginUsername");
+const loginPassword = document.querySelector("#loginPassword");
 const registerForm = document.querySelector("#registerForm");
 const upstreamForm = document.querySelector("#upstreamForm");
 const systemForm = document.querySelector("#systemForm");
@@ -77,6 +79,7 @@ const state = {
   userSummaries: [],
   currentUserKey: "userA",
   activeUpstreamId: "",
+  currentTab: "subscription",
 };
 
 async function copyText(value) {
@@ -179,7 +182,30 @@ async function requestJson(url, options = {}) {
   return payload;
 }
 
+async function storeBrowserCredential() {
+  if (!window.PasswordCredential || !navigator.credentials?.store) {
+    return;
+  }
+
+  const password = (loginPassword?.value || "").trim();
+  if (!password) {
+    return;
+  }
+
+  try {
+    const credential = new PasswordCredential({
+      id: (loginUsername?.value || "snail-panel").trim() || "snail-panel",
+      password,
+      name: "Snail Panel",
+    });
+    await navigator.credentials.store(credential);
+  } catch (error) {
+    // Ignore browser credential API failures and keep normal login flow.
+  }
+}
+
 function activateTab(tabName) {
+  state.currentTab = tabName;
   toggleHidden(subscriptionTab, tabName !== "subscription");
   toggleHidden(logsTab, tabName !== "logs");
   toggleHidden(upstreamsTab, tabName !== "upstreams");
@@ -199,7 +225,7 @@ function showLogin() {
 function showDashboard() {
   toggleHidden(loginView, true);
   toggleHidden(dashboardView, false);
-  activateTab("subscription");
+  activateTab(state.currentTab || "subscription");
 }
 
 function getActiveUpstream() {
@@ -635,27 +661,22 @@ function renderUpstreamSwitcher() {
     return;
   }
 
+  const previousValue = upstreamSwitcher.value;
   upstreamSwitcher.innerHTML = "";
 
   state.upstreams.forEach((upstream) => {
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = `scope-chip${upstream.id === state.activeUpstreamId ? " active" : ""}`;
-
     const modeText = upstream.config?.runtimeMode === "smart_usage" ? "智能模式" : "兼容模式";
     const statusText = upstream.config?.enabled === false ? "已停用" : modeText;
-
-    button.innerHTML = `<strong>${upstream.label}</strong><small>${statusText}</small>`;
-    button.addEventListener("click", async () => {
-      if (upstream.id === state.activeUpstreamId) {
-        return;
-      }
-
-      await switchActiveUpstream(upstream.id);
-    });
-
-    upstreamSwitcher.appendChild(button);
+    const option = document.createElement("option");
+    option.value = upstream.id;
+    option.textContent = `${upstream.label} · ${statusText}`;
+    upstreamSwitcher.appendChild(option);
   });
+
+  const nextValue = state.upstreams.some((item) => item.id === state.activeUpstreamId)
+    ? state.activeUpstreamId
+    : previousValue;
+  upstreamSwitcher.value = nextValue || state.activeUpstreamId || state.upstreams[0]?.id || "";
 }
 
 function applySession(payload) {
@@ -755,6 +776,7 @@ if (loginForm) {
         body: JSON.stringify({ password }),
       });
 
+      await storeBrowserCredential();
       setStatus("登录成功。", "success");
       await refreshSession();
     } catch (error) {
@@ -958,5 +980,16 @@ tabButtons.forEach((button) => {
     activateTab(button.dataset.tab);
   });
 });
+
+if (upstreamSwitcher) {
+  upstreamSwitcher.addEventListener("change", async (event) => {
+    const nextUpstreamId = event.target.value;
+    if (!nextUpstreamId || nextUpstreamId === state.activeUpstreamId) {
+      return;
+    }
+
+    await switchActiveUpstream(nextUpstreamId);
+  });
+}
 
 refreshSession();
