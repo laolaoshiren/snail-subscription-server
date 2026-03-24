@@ -199,64 +199,11 @@
 
           <section id="upstreamsTab" class="tab-panel hidden">
             <div class="workspace workspace-upstreams">
-              <section class="panel upstream-list-panel">
+              <section class="panel upstream-toolbar-panel">
                 <div class="panel-head compact-head">
                   <h2>上游列表</h2>
-                  <p>点击查看，拖动排序。</p>
+                  <p>读取已加载的上游，点击查看详情。</p>
                 </div>
-
-                <form id="upstreamCloudForm" class="tool-block stack-form">
-                  <strong>云端上游同步</strong>
-                  <p>从 GitHub 拉取新的上游模块并自动重载。</p>
-
-                  <label class="checkbox-row">
-                    <input id="upstreamCloudEnabled" name="enabled" type="checkbox" />
-                    <span>启用云端同步</span>
-                  </label>
-
-                  <label class="checkbox-row">
-                    <input id="upstreamCloudAutoSync" name="autoSync" type="checkbox" />
-                    <span>发现更新后自动同步</span>
-                  </label>
-
-                  <label>
-                    <span>GitHub 仓库</span>
-                    <input id="upstreamCloudRepo" name="repo" type="text" placeholder="owner/repo" />
-                  </label>
-
-                  <label>
-                    <span>分支</span>
-                    <input id="upstreamCloudBranch" name="branch" type="text" placeholder="main" />
-                  </label>
-
-                  <label>
-                    <span>模块目录</span>
-                    <input id="upstreamCloudDirectory" name="directory" type="text" placeholder="src/upstreams/vendors" />
-                  </label>
-
-                  <div class="mini-status-grid">
-                    <div class="context-card">
-                      <span>同步状态</span>
-                      <strong id="upstreamCloudState">未检查</strong>
-                    </div>
-                    <div class="context-card">
-                      <span>云端版本</span>
-                      <strong id="upstreamCloudLatest">暂无</strong>
-                    </div>
-                    <div class="context-card">
-                      <span>最近同步</span>
-                      <strong id="upstreamCloudSyncedAt">暂无</strong>
-                    </div>
-                  </div>
-
-                  <p id="upstreamCloudHint" class="form-hint">保存后可手动检查或立即同步。</p>
-
-                  <div class="inline-actions">
-                    <button id="saveUpstreamCloudButton" class="primary-button slim-button" type="submit">保存云端配置</button>
-                    <button id="checkUpstreamCloudButton" class="ghost-button slim-button" type="button">检查云端</button>
-                    <button id="syncUpstreamCloudButton" class="ghost-button slim-button" type="button">立即同步</button>
-                  </div>
-                </form>
 
                 <div id="upstreamList" class="upstream-list"></div>
               </section>
@@ -366,6 +313,66 @@
                   </div>
 
                   <button id="saveUpstreamButton" class="primary-button" type="submit">保存当前上游配置</button>
+                </form>
+              </section>
+
+              <section class="panel upstream-cloud-panel">
+                <div class="panel-head compact-head">
+                  <h2>云端上游同步</h2>
+                  <p>从 GitHub 拉取新模块并重载。</p>
+                </div>
+
+                <form id="upstreamCloudForm" class="tool-block stack-form">
+                  <strong>云端上游同步</strong>
+                  <p>从 GitHub 拉取新的上游模块并自动重载。</p>
+
+                  <label class="checkbox-row">
+                    <input id="upstreamCloudEnabled" name="enabled" type="checkbox" />
+                    <span>启用云端同步</span>
+                  </label>
+
+                  <label class="checkbox-row">
+                    <input id="upstreamCloudAutoSync" name="autoSync" type="checkbox" />
+                    <span>发现更新后自动同步</span>
+                  </label>
+
+                  <label>
+                    <span>GitHub 仓库</span>
+                    <input id="upstreamCloudRepo" name="repo" type="text" placeholder="owner/repo" />
+                  </label>
+
+                  <label>
+                    <span>分支</span>
+                    <input id="upstreamCloudBranch" name="branch" type="text" placeholder="main" />
+                  </label>
+
+                  <label>
+                    <span>模块目录</span>
+                    <input id="upstreamCloudDirectory" name="directory" type="text" placeholder="src/upstreams/vendors" />
+                  </label>
+
+                  <div class="mini-status-grid">
+                    <div class="context-card">
+                      <span>同步状态</span>
+                      <strong id="upstreamCloudState">未检查</strong>
+                    </div>
+                    <div class="context-card">
+                      <span>云端版本</span>
+                      <strong id="upstreamCloudLatest">暂无</strong>
+                    </div>
+                    <div class="context-card">
+                      <span>最近同步</span>
+                      <strong id="upstreamCloudSyncedAt">暂无</strong>
+                    </div>
+                  </div>
+
+                  <p id="upstreamCloudHint" class="form-hint">保存后可手动检查或立即同步。</p>
+
+                  <div class="inline-actions">
+                    <button id="saveUpstreamCloudButton" class="primary-button slim-button" type="submit">保存云端配置</button>
+                    <button id="checkUpstreamCloudButton" class="ghost-button slim-button" type="button">检查云端</button>
+                    <button id="syncUpstreamCloudButton" class="ghost-button slim-button" type="button">立即同步</button>
+                  </div>
                 </form>
               </section>
             </div>

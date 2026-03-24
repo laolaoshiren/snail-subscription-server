@@ -126,7 +126,6 @@ const state = {
   announcedUpdateKey: "",
   updateReconnectTimer: null,
 };
-let draggingUpstreamId = "";
 let qrModalRequestToken = 0;
 let copyToastTimer = 0;
 
@@ -602,28 +601,6 @@ function selectUpstreamConfig(upstreamId) {
   syncUpstreamForm();
 }
 
-async function persistUpstreamOrder(nextOrder) {
-  const previousOrder = [...state.upstreamOrder];
-  state.upstreamOrder = [...nextOrder];
-  renderUpstreamSwitcher();
-  renderUpstreamList();
-
-  try {
-    await requestJson("/api/settings", {
-      method: "POST",
-      body: JSON.stringify({
-        upstreamOrder: nextOrder,
-      }),
-    });
-  } catch (error) {
-    state.upstreamOrder = previousOrder;
-    renderUpstreamSwitcher();
-    renderUpstreamList();
-    syncUpstreamForm();
-    setStatus(error.message, "error");
-  }
-}
-
 function renderUpstreamList() {
   if (!upstreamList) {
     return;
@@ -631,68 +608,26 @@ function renderUpstreamList() {
 
   upstreamList.innerHTML = "";
 
-  getOrderedUpstreams().forEach((upstream, index) => {
+  const orderedUpstreams = getOrderedUpstreams();
+  if (orderedUpstreams.length === 0) {
+    upstreamList.innerHTML = '<div class="empty-state">当前还没有读取到可用上游。</div>';
+    return;
+  }
+
+  orderedUpstreams.forEach((upstream) => {
     const item = document.createElement("button");
     item.type = "button";
     item.className = `upstream-list-item${upstream.id === state.selectedUpstreamId ? " active" : ""}${upstream.config?.enabled === false ? " disabled" : ""}`;
-    item.draggable = true;
     item.dataset.upstreamId = upstream.id;
     item.innerHTML = `
-      <span class="upstream-list-item__order">${String(index + 1).padStart(2, "0")}</span>
       <span class="upstream-list-item__body">
         <strong>${upstream.label || upstream.id}</strong>
         <small>${upstream.config?.enabled === false ? "已停用" : upstream.sourceType === "synced" ? `${upstream.id} · 云端` : upstream.id}</small>
       </span>
-      <span class="upstream-list-item__drag">⋮⋮</span>
     `;
 
     item.addEventListener("click", () => {
       selectUpstreamConfig(upstream.id);
-    });
-
-    item.addEventListener("dragstart", (event) => {
-      draggingUpstreamId = upstream.id;
-      item.classList.add("dragging");
-      event.dataTransfer.effectAllowed = "move";
-      event.dataTransfer.setData("text/plain", upstream.id);
-    });
-
-    item.addEventListener("dragend", () => {
-      draggingUpstreamId = "";
-      item.classList.remove("dragging");
-    });
-
-    item.addEventListener("dragover", (event) => {
-      if (!draggingUpstreamId || draggingUpstreamId === upstream.id) {
-        return;
-      }
-
-      event.preventDefault();
-      event.dataTransfer.dropEffect = "move";
-      item.classList.add("drag-target");
-    });
-
-    item.addEventListener("dragleave", () => {
-      item.classList.remove("drag-target");
-    });
-
-    item.addEventListener("drop", async (event) => {
-      item.classList.remove("drag-target");
-      if (!draggingUpstreamId || draggingUpstreamId === upstream.id) {
-        return;
-      }
-
-      event.preventDefault();
-      const orderedIds = getOrderedUpstreams()
-        .map((item) => item.id)
-        .filter((upstreamId) => upstreamId !== draggingUpstreamId);
-      const targetIndex = orderedIds.indexOf(upstream.id);
-      if (targetIndex < 0) {
-        return;
-      }
-
-      orderedIds.splice(targetIndex, 0, draggingUpstreamId);
-      await persistUpstreamOrder(orderedIds);
     });
 
     upstreamList.appendChild(item);
