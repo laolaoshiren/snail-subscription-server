@@ -6,22 +6,17 @@ const http = require("node:http");
 const path = require("node:path");
 const { URL } = require("node:url");
 
-const {
-  URL_TYPES,
-  ensureProxyConfigured,
-  querySubscriptionStatus,
-  registerAndFetchSubscribe,
-} = require("../auto_register");
+const { ensureProxyConfigured } = require("./httpClient");
 const {
   DEFAULT_PASSWORD,
-  DEFAULT_RUNTIME_MODE,
   DEFAULT_USER_KEY,
   RELAY_USERS,
   RUNTIME_MODES,
+  getActiveUpstreamId,
   getDisplayOrigin,
   getRelayToken,
-  getRuntimeMode,
   listRelayUsers,
+  listUpstreamConfigs,
   normalizeUserKey,
   resolveRelayUserByToken,
   updatePanelSettings,
@@ -33,20 +28,19 @@ const {
   getUserState,
   listUserStates,
   loadRelayState,
-  updateUserState,
 } = require("./registrationStore");
+const { reloadUpstreamModules } = require("./upstreams/core/registry");
+const { URL_TYPES } = require("./upstreams/shared/snailApi");
+const { manualRegister, resolveRelayState, resolveViewState } = require("./upstreams/service");
 
 const HOST = process.env.HOST || "0.0.0.0";
 const PORT = Number.parseInt(process.env.PORT || "3000", 10);
-const DEFAULT_INVITE_CODE = (process.env.INVITE_CODE || process.env.DEFAULT_INVITE_CODE || "").trim();
 const PUBLIC_ORIGIN = normalizeConfiguredOrigin(process.env.PUBLIC_ORIGIN || "");
 const SESSION_COOKIE_NAME = "snail_session";
 const SESSION_TTL_MS = 1000 * 60 * 60 * 12;
 const RELAY_FETCH_TIMEOUT_MS = Number.parseInt(process.env.RELAY_FETCH_TIMEOUT_MS || "30000", 10);
-const SMART_REMAINING_THRESHOLD_PERCENT = 20;
 const publicDir = path.join(__dirname, "..", "public");
 const sessions = new Map();
-const registrationQueues = new Map();
 
 const RELAY_TYPES = Object.keys(URL_TYPES);
 const SUPPORTED_TYPES = new Set(["full", ...RELAY_TYPES]);
@@ -80,6 +74,8 @@ function normalizeConfiguredOrigin(input) {
 function sendJson(response, statusCode, payload, headers = {}) {
   response.writeHead(statusCode, {
     "Content-Type": "application/json; charset=utf-8",
+    "Cache-Control": "no-store, max-age=0, must-revalidate",
+    Pragma: "no-cache",
     ...headers,
   });
   response.end(`${JSON.stringify(payload, null, 2)}\n`);
@@ -97,9 +93,33 @@ function sendHtml(response, statusCode, html) {
 function sendText(response, statusCode, text, headers = {}) {
   response.writeHead(statusCode, {
     "Content-Type": "text/plain; charset=utf-8",
+    "Cache-Control": "no-store, max-age=0, must-revalidate",
+    Pragma: "no-cache",
     ...headers,
   });
   response.end(`${text}\n`);
+}
+
+async function getAssetVersion() {
+  const assets = ["index.html", "app.js", "styles.css"];
+  const stats = await Promise.all(
+    assets.map(async (fileName) => {
+      const filePath = path.join(publicDir, fileName);
+      try {
+        return await fs.stat(filePath);
+      } catch (error) {
+        return { mtimeMs: Date.now() };
+      }
+    }),
+  );
+
+  return Math.max(...stats.map((item) => Math.floor(item.mtimeMs))).toString(36);
+}
+
+async function serveIndex(response) {
+  const template = await fs.readFile(path.join(publicDir, "index.html"), "utf8");
+  const assetVersion = await getAssetVersion();
+  sendHtml(response, 200, template.replaceAll("__ASSET_VERSION__", assetVersion));
 }
 
 async function serveStaticFile(response, fileName, contentType) {
@@ -175,6 +195,8 @@ function sanitizeRegistration(record) {
     password: record.password || "",
     inviteCode: record.inviteCode || "",
     createdAt: record.createdAt || "",
+    accountCreatedAt: record.accountCreatedAt || "",
+    expiredAt: record.expiredAt || "",
     mock: Boolean(record.mock),
     upstreamSite: record.upstreamSite || "",
     apiBase: record.apiBase || "",
@@ -221,6 +243,7 @@ function sanitizeHistoryEntry(entry) {
     decision: entry.decision || "",
     relayType: entry.relayType || "",
     requestSource: entry.requestSource || "",
+    upstreamId: entry.upstreamId || "",
     usage: sanitizeUsage(entry.usage),
     registration: sanitizeRegistration(entry.registration),
     details: entry.details || null,
@@ -246,7 +269,7 @@ function buildUserSummary(user, userState) {
   };
 }
 
-function shapeRegistrationResponse(user, userState, type, relayUrls, runtimeMode, warning = "") {
+function shapeRegistrationResponse(user, upstream, userState, type, relayUrls, warning = "") {
   const subscriptionUrl = type === "full" ? relayUrls.universal : relayUrls[type];
 
   return {
@@ -254,8 +277,19 @@ function shapeRegistrationResponse(user, userState, type, relayUrls, runtimeMode
       key: user.key,
       label: user.label,
     },
-    runtimeMode,
-    trafficThresholdPercent: SMART_REMAINING_THRESHOLD_PERCENT,
+    upstream: upstream
+      ? {
+          id: upstream.id,
+          label: upstream.label,
+          description: upstream.description || "",
+          settingFields: Array.isArray(upstream.settingFields) ? upstream.settingFields : [],
+          config: upstream.config || null,
+          active: Boolean(upstream.active),
+        }
+      : null,
+    runtimeMode: upstream?.config?.runtimeMode || "",
+    trafficThresholdPercent: upstream?.config?.trafficThresholdPercent ?? 20,
+    maxRegistrationAgeMinutes: upstream?.config?.maxRegistrationAgeMinutes ?? 0,
     type,
     subscriptionUrl,
     relayUrls,
@@ -289,323 +323,6 @@ async function readJsonBody(request) {
   } catch (error) {
     throw new Error("Request body must be valid JSON.");
   }
-}
-
-function enqueueRegistration(userKey, job) {
-  const currentQueue = registrationQueues.get(userKey) || Promise.resolve();
-  const nextJob = currentQueue.then(job, job);
-  registrationQueues.set(userKey, nextJob.catch(() => undefined));
-  return nextJob;
-}
-
-function resolveInviteCode(inviteCode, record) {
-  return (inviteCode || record?.inviteCode || DEFAULT_INVITE_CODE || "").toString().trim();
-}
-
-function mergeRegistrationWithUsage(record, usage) {
-  if (!record) {
-    return null;
-  }
-
-  const nextRecord = {
-    ...record,
-    email: usage?.email || record.email,
-    subscribeUrl: usage?.subscribeUrl || record.subscribeUrl,
-    clientUrls:
-      usage?.clientUrls && Object.keys(usage.clientUrls).length > 0
-        ? usage.clientUrls
-        : record.clientUrls,
-    upstreamSite: usage?.upstreamSite || record.upstreamSite,
-    apiBase: usage?.apiBase || record.apiBase,
-    entryUrl: usage?.entryUrl || record.entryUrl,
-    detectorConfigUrl: usage?.detectorConfigUrl || record.detectorConfigUrl,
-    upstreamSource: usage?.upstreamSource || record.upstreamSource,
-    lastUsageCheckAt: usage?.queriedAt || record.lastUsageCheckAt || "",
-  };
-
-  return nextRecord;
-}
-
-async function createRegistration(userKey, inviteCode, context = {}) {
-  const result = await registerAndFetchSubscribe({
-    inviteCode,
-    verbose: false,
-    logger: console,
-  });
-
-  await updateUserState(userKey, async (userState) => {
-    userState.latestRegistration = result;
-    userState.latestUsage = null;
-    userState.history = [
-      {
-        action: "register",
-        title: context.title || "已注册新的上游账号",
-        message: context.message || "服务端已创建新的上游订阅账号。",
-        mode: context.mode || "",
-        decision: context.decision || "register",
-        relayType: context.relayType || "",
-        requestSource: context.requestSource || "",
-        registration: result,
-        details: context.details || null,
-      },
-      ...(Array.isArray(userState.history) ? userState.history : []),
-    ];
-  });
-
-  return result;
-}
-
-async function saveUsageSnapshot(userKey, record, usage, context = {}) {
-  const mergedRecord = mergeRegistrationWithUsage(record, usage);
-
-  await updateUserState(userKey, async (userState) => {
-    userState.latestRegistration = mergedRecord;
-    userState.latestUsage = usage;
-    userState.history = [
-      {
-        action: "usage_check",
-        title: context.title || "已查询上游流量状态",
-        message: context.message || "服务端已刷新当前上游账号的流量和到期信息。",
-        mode: context.mode || "",
-        decision: context.decision || "",
-        relayType: context.relayType || "",
-        requestSource: context.requestSource || "",
-        usage,
-        registration: mergedRecord,
-        details: context.details || null,
-      },
-      ...(Array.isArray(userState.history) ? userState.history : []),
-    ];
-  });
-
-  return {
-    latestRegistration: mergedRecord,
-    latestUsage: usage,
-  };
-}
-
-async function queryCurrentUsage(record) {
-  if (!record || record.mock) {
-    return null;
-  }
-
-  return querySubscriptionStatus({
-    token: record.token,
-    apiBase: record.apiBase,
-    upstreamSite: record.upstreamSite,
-    entryUrl: record.entryUrl,
-    detectorConfigUrl: record.detectorConfigUrl,
-    upstreamSource: record.upstreamSource,
-    verbose: false,
-    logger: console,
-  });
-}
-
-async function resolveViewState(userKey, runtimeMode) {
-  const currentState = await getUserState(userKey);
-
-  if (runtimeMode !== RUNTIME_MODES.SMART_USAGE) {
-    return {
-      userState: currentState,
-      warning: "",
-    };
-  }
-
-  if (!currentState.latestRegistration) {
-    const inviteCode = resolveInviteCode("", currentState.latestRegistration);
-    await enqueueRegistration(userKey, async () =>
-      createRegistration(userKey, inviteCode, {
-        mode: runtimeMode,
-        requestSource: "view",
-        title: "查看时已初始化用户",
-        message: "管理页查看该用户时发现没有可用记录，已自动注册新的上游账号。",
-        decision: "register",
-      }),
-    );
-
-    return {
-      userState: await getUserState(userKey),
-      warning: "",
-    };
-  }
-
-  try {
-    const usage = await queryCurrentUsage(currentState.latestRegistration);
-    if (!usage) {
-      return {
-        userState: currentState,
-        warning: "",
-      };
-    }
-
-    await saveUsageSnapshot(userKey, currentState.latestRegistration, usage, {
-      mode: runtimeMode,
-      requestSource: "view",
-      title: "查看时已刷新上游流量状态",
-      message: "管理页查看请求触发了一次上游状态查询。",
-      decision:
-        usage.remainingPercent < SMART_REMAINING_THRESHOLD_PERCENT ? "low-traffic" : "reuse",
-      details: {
-        thresholdPercent: SMART_REMAINING_THRESHOLD_PERCENT,
-      },
-    });
-
-    return {
-      userState: await getUserState(userKey),
-      warning: "",
-    };
-  } catch (error) {
-    await appendUserHistory(userKey, {
-      action: "usage_check_failed",
-      title: "查看时查询上游失败",
-      message: error.message,
-      mode: runtimeMode,
-      requestSource: "view",
-      registration: currentState.latestRegistration,
-    });
-
-    return {
-      userState: await getUserState(userKey),
-      warning: `上游查询失败，已返回本地缓存：${error.message}`,
-    };
-  }
-}
-
-async function resolveRelayState(userKey, type) {
-  return enqueueRegistration(userKey, async () => {
-    const runtimeMode = await getRuntimeMode();
-    const initialState = await getUserState(userKey);
-    const inviteCode = resolveInviteCode("", initialState.latestRegistration);
-
-    if (runtimeMode === RUNTIME_MODES.ALWAYS_REFRESH) {
-      const registration = await createRegistration(userKey, inviteCode, {
-        mode: runtimeMode,
-        requestSource: "relay",
-        relayType: type,
-        title: "兼容模式已重新注册",
-        message: "客户端拉取订阅时按兼容模式重新注册上游账号。",
-        decision: "register",
-      });
-
-      return {
-        runtimeMode,
-        userState: {
-          ...(await getUserState(userKey)),
-          latestRegistration: registration,
-        },
-      };
-    }
-
-    if (!initialState.latestRegistration) {
-      const registration = await createRegistration(userKey, inviteCode, {
-        mode: runtimeMode,
-        requestSource: "relay",
-        relayType: type,
-        title: "无可用记录，已注册新账号",
-        message: "客户端首次拉取该用户订阅，已自动注册新的上游账号。",
-        decision: "register",
-      });
-
-      return {
-        runtimeMode,
-        userState: {
-          ...(await getUserState(userKey)),
-          latestRegistration: registration,
-        },
-      };
-    }
-
-    let usage = null;
-
-    try {
-      usage = await queryCurrentUsage(initialState.latestRegistration);
-    } catch (error) {
-      await appendUserHistory(userKey, {
-        action: "usage_check_failed",
-        title: "客户端拉取前查询上游失败",
-        message: error.message,
-        mode: runtimeMode,
-        requestSource: "relay",
-        relayType: type,
-        registration: initialState.latestRegistration,
-      });
-    }
-
-    if (!usage) {
-      const registration = await createRegistration(userKey, inviteCode, {
-        mode: runtimeMode,
-        requestSource: "relay",
-        relayType: type,
-        title: "查询失败，已重新注册",
-        message: "当前上游账号查询失败，服务端已回退为重新注册。",
-        decision: "register",
-      });
-
-      return {
-        runtimeMode,
-        userState: {
-          ...(await getUserState(userKey)),
-          latestRegistration: registration,
-        },
-      };
-    }
-
-    await saveUsageSnapshot(userKey, initialState.latestRegistration, usage, {
-      mode: runtimeMode,
-      requestSource: "relay",
-      relayType: type,
-      title: "客户端拉取前已查询流量",
-      message: "服务端已先查询当前上游账号的剩余流量。",
-      decision:
-        usage.remainingPercent < SMART_REMAINING_THRESHOLD_PERCENT ? "low-traffic" : "reuse",
-      details: {
-        thresholdPercent: SMART_REMAINING_THRESHOLD_PERCENT,
-      },
-    });
-
-    if (usage.remainingPercent < SMART_REMAINING_THRESHOLD_PERCENT) {
-      const registration = await createRegistration(userKey, inviteCode, {
-        mode: runtimeMode,
-        requestSource: "relay",
-        relayType: type,
-        title: "剩余流量不足，已重新注册",
-        message: `检测到剩余流量低于 ${SMART_REMAINING_THRESHOLD_PERCENT}% ，已更换新的上游账号。`,
-        decision: "register",
-        details: {
-          remainingPercent: usage.remainingPercent,
-          thresholdPercent: SMART_REMAINING_THRESHOLD_PERCENT,
-        },
-      });
-
-      return {
-        runtimeMode,
-        userState: {
-          ...(await getUserState(userKey)),
-          latestRegistration: registration,
-        },
-      };
-    }
-
-    await appendUserHistory(userKey, {
-      action: "reuse_registration",
-      title: "剩余流量充足，继续复用",
-      message: `当前剩余流量 ${usage.remainingPercent}% ，继续返回现有上游订阅内容。`,
-      mode: runtimeMode,
-      decision: "reuse",
-      relayType: type,
-      requestSource: "relay",
-      usage,
-      registration: mergeRegistrationWithUsage(initialState.latestRegistration, usage),
-      details: {
-        thresholdPercent: SMART_REMAINING_THRESHOLD_PERCENT,
-      },
-    });
-
-    return {
-      runtimeMode,
-      userState: await getUserState(userKey),
-    };
-  });
 }
 
 async function fetchUpstreamSubscription(upstreamUrl) {
@@ -703,6 +420,10 @@ function requireAuth(request, response) {
   return session;
 }
 
+function getUpstreamSummary(upstreams, upstreamId) {
+  return upstreams.find((item) => item.id === upstreamId) || upstreams[0] || null;
+}
+
 async function handleLogin(request, response) {
   const body = await readJsonBody(request);
   const password = (body.password || "").toString();
@@ -716,7 +437,6 @@ async function handleLogin(request, response) {
   }
 
   const { valid } = await verifyPasswordLogin(password);
-
   if (!valid) {
     sendJson(response, 401, {
       success: false,
@@ -739,6 +459,7 @@ async function handleLogout(request, response) {
   if (session) {
     destroySession(session.token);
   }
+
   clearSessionCookie(response);
   sendJson(response, 200, {
     success: true,
@@ -748,7 +469,6 @@ async function handleLogout(request, response) {
 
 async function handleSession(request, response) {
   const session = getSession(request);
-
   if (!session) {
     sendJson(response, 200, {
       success: true,
@@ -759,27 +479,31 @@ async function handleSession(request, response) {
   }
 
   const origin = await getRequestOrigin(request);
-  const runtimeMode = await getRuntimeMode();
+  const activeUpstreamId = await getActiveUpstreamId();
   const displayOrigin = await getDisplayOrigin();
   const relayUsers = await listRelayUsers();
-  const userStates = await listUserStates();
+  const upstreams = await listUpstreamConfigs();
+  const userStates = await listUserStates(activeUpstreamId);
   const stateByUser = Object.fromEntries(userStates.map((item) => [item.userKey, item]));
   const relayUrlsByUser = await buildRelayUrlsByUser(origin);
   const userSummaries = relayUsers.map((user) =>
-    buildUserSummary(user, stateByUser[user.key] || { latestRegistration: null, latestUsage: null, history: [], updatedAt: null }),
+    buildUserSummary(
+      user,
+      stateByUser[user.key] || { latestRegistration: null, latestUsage: null, history: [], updatedAt: null },
+    ),
   );
 
   sendJson(response, 200, {
     success: true,
     authenticated: true,
     defaultPassword: DEFAULT_PASSWORD,
-    runtimeMode,
     displayOrigin,
+    activeUpstreamId,
+    upstreams,
     runtimeModes: {
       alwaysRefresh: RUNTIME_MODES.ALWAYS_REFRESH,
       smartUsage: RUNTIME_MODES.SMART_USAGE,
     },
-    trafficThresholdPercent: SMART_REMAINING_THRESHOLD_PERCENT,
     users: relayUsers.map((user) => ({
       key: user.key,
       label: user.label,
@@ -807,17 +531,35 @@ async function handleUpdatePassword(request, response) {
 async function handleUpdateSettings(request, response) {
   const body = await readJsonBody(request);
   const result = await updatePanelSettings({
-    runtimeMode: body.runtimeMode,
     displayOrigin: body.displayOrigin,
+    activeUpstreamId: body.activeUpstreamId,
+    upstreamId: body.upstreamId,
+    runtimeMode: body.runtimeMode,
+    trafficThresholdPercent: body.trafficThresholdPercent,
+    maxRegistrationAgeMinutes: body.maxRegistrationAgeMinutes,
+    inviteCode: body.inviteCode,
+    providerSettings: body.providerSettings,
+    enabled: body.enabled,
   });
 
   sendJson(response, 200, {
     success: true,
     message: "Settings updated.",
-    runtimeMode: result.runtimeMode,
+    activeUpstreamId: result.activeUpstreamId,
     displayOrigin: result.displayOrigin,
     updatedAt: result.updatedAt,
-    trafficThresholdPercent: SMART_REMAINING_THRESHOLD_PERCENT,
+    upstreamConfig: result.upstreamConfig,
+  });
+}
+
+async function handleReloadUpstreams(response) {
+  reloadUpstreamModules();
+  const upstreams = await listUpstreamConfigs();
+
+  sendJson(response, 200, {
+    success: true,
+    message: "Upstream modules reloaded.",
+    upstreams,
   });
 }
 
@@ -826,6 +568,7 @@ async function handleCreateSubscription(request, response) {
   const inviteCode = typeof body.inviteCode === "string" ? body.inviteCode.trim() : "";
   const type = normalizeType(body.type);
   const userKey = normalizeUserKey(body.userKey);
+  const upstreamId = (body.upstreamId || (await getActiveUpstreamId())).toString();
 
   if (!SUPPORTED_TYPES.has(type)) {
     sendJson(response, 400, {
@@ -836,41 +579,27 @@ async function handleCreateSubscription(request, response) {
     return;
   }
 
-  const runtimeMode = await getRuntimeMode();
-  const registration = await enqueueRegistration(userKey, async () =>
-    createRegistration(userKey, inviteCode, {
-      mode: runtimeMode,
-      requestSource: "manual",
-      relayType: type === "full" ? "universal" : type,
-      title: "管理页手动重新注册",
-      message: "已根据管理页请求生成新的上游账号。",
-      decision: "register",
-    }),
-  );
+  const result = await manualRegister(userKey, upstreamId, {
+    inviteCode,
+    relayType: type === "full" ? "universal" : type,
+  });
   const relayToken = await getRelayToken(userKey);
   const relayUrls = buildRelayUrls(await getRequestOrigin(request), relayToken);
+  const upstreams = await listUpstreamConfigs();
+  const upstream = getUpstreamSummary(upstreams, upstreamId);
   const user = RELAY_USERS.find((item) => item.key === userKey) || RELAY_USERS[0];
-  const userState = await getUserState(userKey);
 
   sendJson(response, 200, {
     success: true,
     message: "Registration completed.",
-    ...shapeRegistrationResponse(
-      user,
-      {
-        ...userState,
-        latestRegistration: registration,
-      },
-      type,
-      relayUrls,
-      runtimeMode,
-    ),
+    ...shapeRegistrationResponse(user, upstream, result.userState, type, relayUrls),
   });
 }
 
 async function handleLatestSubscription(request, response, url) {
   const type = normalizeType(url.searchParams.get("type"));
   const userKey = normalizeUserKey(url.searchParams.get("user"));
+  const upstreamId = (url.searchParams.get("upstreamId") || (await getActiveUpstreamId())).toString();
 
   if (!SUPPORTED_TYPES.has(type)) {
     sendJson(response, 400, {
@@ -881,20 +610,19 @@ async function handleLatestSubscription(request, response, url) {
     return;
   }
 
-  const runtimeMode = await getRuntimeMode();
-  const { userState, warning } = await resolveViewState(userKey, runtimeMode);
+  const result = await resolveViewState(userKey, upstreamId);
   const relayToken = await getRelayToken(userKey);
   const relayUrls = buildRelayUrls(await getRequestOrigin(request), relayToken);
+  const upstreams = await listUpstreamConfigs();
+  const upstream = getUpstreamSummary(upstreams, upstreamId);
   const user = RELAY_USERS.find((item) => item.key === userKey) || RELAY_USERS[0];
 
   sendJson(response, 200, {
     success: true,
-    message: userState.latestRegistration
+    message: result.userState.latestRegistration
       ? "Latest user state returned."
-      : runtimeMode === DEFAULT_RUNTIME_MODE
-        ? "Current user has no registration yet."
-        : "Current user has no registration yet. A client pull or manual refresh will initialize it.",
-    ...shapeRegistrationResponse(user, userState, type, relayUrls, runtimeMode, warning),
+      : "Current user has no registration yet.",
+    ...shapeRegistrationResponse(user, upstream, result.userState, type, relayUrls, result.warning),
   });
 }
 
@@ -907,7 +635,8 @@ async function proxySubscription(response, request, type, url) {
     return;
   }
 
-  const { runtimeMode, userState } = await resolveRelayState(relayUser.key, type);
+  const upstreamId = await getActiveUpstreamId();
+  const { runtimeMode, userState } = await resolveRelayState(relayUser.key, upstreamId, type);
   const latest = userState.latestRegistration;
   const upstreamUrl = latest?.clientUrls?.[type];
 
@@ -917,7 +646,7 @@ async function proxySubscription(response, request, type, url) {
   }
 
   if (latest.mock) {
-    await appendUserHistory(relayUser.key, {
+    await appendUserHistory(relayUser.key, upstreamId, {
       action: "relay_mock",
       title: "已返回 Mock 订阅",
       message: "当前用户处于 Mock 模式，客户端收到的是本地生成的调试内容。",
@@ -951,7 +680,7 @@ async function proxySubscription(response, request, type, url) {
   try {
     upstreamResponse = await fetchUpstreamSubscription(upstreamUrl);
   } catch (error) {
-    await appendUserHistory(relayUser.key, {
+    await appendUserHistory(relayUser.key, upstreamId, {
       action: "relay_failed",
       title: "中转拉取上游失败",
       message: error.message,
@@ -966,7 +695,7 @@ async function proxySubscription(response, request, type, url) {
   }
 
   if (!upstreamResponse.ok) {
-    await appendUserHistory(relayUser.key, {
+    await appendUserHistory(relayUser.key, upstreamId, {
       action: "relay_failed",
       title: "上游返回异常状态码",
       message: `上游状态码 ${upstreamResponse.status}`,
@@ -988,7 +717,7 @@ async function proxySubscription(response, request, type, url) {
     return;
   }
 
-  await appendUserHistory(relayUser.key, {
+  await appendUserHistory(relayUser.key, upstreamId, {
     action: "relay_success",
     title: "已成功中转客户端订阅",
     message: `客户端成功拉取 ${type} 订阅。`,
@@ -1017,13 +746,27 @@ async function proxySubscription(response, request, type, url) {
   response.end(body);
 }
 
+async function handleHealth(response) {
+  const relayState = await loadRelayState();
+  const activeUpstreamId = await getActiveUpstreamId();
+  const latestRegistrationAvailable = Object.values(relayState.users || {}).some((userState) =>
+    Boolean(userState?.upstreams?.[activeUpstreamId]?.latestRegistration),
+  );
+
+  sendJson(response, 200, {
+    success: true,
+    status: "ok",
+    activeUpstreamId,
+    latestRegistrationAvailable,
+  });
+}
+
 async function requestListener(request, response) {
   const url = new URL(request.url, `http://${request.headers.host || "localhost"}`);
 
   try {
     if (request.method === "GET" && url.pathname === "/") {
-      const html = await fs.readFile(path.join(publicDir, "index.html"), "utf8");
-      sendHtml(response, 200, html);
+      await serveIndex(response);
       return;
     }
 
@@ -1043,20 +786,13 @@ async function requestListener(request, response) {
         sendText(response, 404, "Subscription route not found.");
         return;
       }
+
       await proxySubscription(response, request, type, url);
       return;
     }
 
     if (request.method === "GET" && url.pathname === "/api/health") {
-      const relayState = await loadRelayState();
-      const latestRegistrationAvailable = Object.values(relayState.users || {}).some(
-        (userState) => Boolean(userState?.latestRegistration),
-      );
-      sendJson(response, 200, {
-        success: true,
-        status: "ok",
-        latestRegistrationAvailable,
-      });
+      await handleHealth(response);
       return;
     }
 
@@ -1088,6 +824,11 @@ async function requestListener(request, response) {
 
       if (request.method === "POST" && url.pathname === "/api/settings") {
         await handleUpdateSettings(request, response);
+        return;
+      }
+
+      if (request.method === "POST" && url.pathname === "/api/upstreams/reload") {
+        await handleReloadUpstreams(response);
         return;
       }
 

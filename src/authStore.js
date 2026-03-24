@@ -4,7 +4,8 @@ const crypto = require("node:crypto");
 const fs = require("node:fs/promises");
 const path = require("node:path");
 
-const { dataDir } = require("./registrationStore");
+const { dataDir } = require("./dataPaths");
+const { getDefaultUpstreamId, getUpstreamModule, listUpstreamModules } = require("./upstreams/core/registry");
 
 const accountFile = path.join(dataDir, "account.json");
 const DEFAULT_PASSWORD = "admin";
@@ -27,7 +28,6 @@ const RUNTIME_MODES = Object.freeze({
   ALWAYS_REFRESH: "always_refresh",
   SMART_USAGE: "smart_usage",
 });
-const DEFAULT_RUNTIME_MODE = RUNTIME_MODES.ALWAYS_REFRESH;
 
 function hashPassword(password, salt) {
   return crypto.scryptSync(password, salt, 64).toString("hex");
@@ -51,12 +51,6 @@ function isUserKey(input) {
 function normalizeUserKey(input, fallback = DEFAULT_USER_KEY) {
   const value = (input || "").toString().trim();
   return isUserKey(value) ? value : fallback;
-}
-
-function normalizeRuntimeMode(input) {
-  return input === RUNTIME_MODES.SMART_USAGE
-    ? RUNTIME_MODES.SMART_USAGE
-    : RUNTIME_MODES.ALWAYS_REFRESH;
 }
 
 function normalizeDisplayOrigin(input) {
@@ -102,28 +96,73 @@ function normalizeRelayTokens(tokens, legacyRelayToken = "") {
   return nextTokens;
 }
 
+function normalizeUpstreamConfigs(rawUpstreams, legacyRuntimeMode) {
+  const source = rawUpstreams && typeof rawUpstreams === "object" ? rawUpstreams : {};
+  const result = {};
+
+  listUpstreamModules().forEach((module) => {
+    const current = source[module.manifest.id] && typeof source[module.manifest.id] === "object"
+      ? source[module.manifest.id]
+      : {};
+    const withLegacyRuntime =
+      current.runtimeMode === undefined && legacyRuntimeMode
+        ? { ...current, runtimeMode: legacyRuntimeMode }
+        : current;
+    result[module.manifest.id] = module.normalizeSettings(withLegacyRuntime);
+  });
+
+  return result;
+}
+
+function resolveActiveUpstreamId(input, upstreams) {
+  const candidate = (input || "").toString().trim();
+  if (candidate && upstreams[candidate]?.enabled) {
+    return candidate;
+  }
+
+  const firstEnabled = Object.entries(upstreams).find(([, config]) => config?.enabled !== false);
+  if (firstEnabled) {
+    return firstEnabled[0];
+  }
+
+  return getDefaultUpstreamId();
+}
+
 function createSecurityState(password, options = {}) {
   const salt = crypto.randomBytes(16).toString("hex");
+  const upstreams = normalizeUpstreamConfigs(options.upstreams, options.runtimeMode);
+
   return {
     passwordSalt: salt,
     passwordHash: hashPassword(password, salt),
     relayTokens: normalizeRelayTokens(options.relayTokens, options.legacyRelayToken),
-    runtimeMode: normalizeRuntimeMode(options.runtimeMode),
     displayOrigin: normalizeDisplayOrigin(options.displayOrigin),
+    activeUpstreamId: resolveActiveUpstreamId(options.activeUpstreamId, upstreams),
+    upstreams,
     updatedAt: new Date().toISOString(),
   };
 }
 
-async function saveSecurityState(state) {
-  const normalizedState = {
-    passwordSalt: state.passwordSalt,
-    passwordHash: state.passwordHash,
-    relayTokens: normalizeRelayTokens(state.relayTokens),
-    runtimeMode: normalizeRuntimeMode(state.runtimeMode),
-    displayOrigin: normalizeDisplayOrigin(state.displayOrigin),
-    updatedAt: state.updatedAt || new Date().toISOString(),
-  };
+function normalizePanelState(rawState = {}) {
+  if (!rawState.passwordSalt || !rawState.passwordHash) {
+    throw new Error("Security file is invalid.");
+  }
 
+  const upstreams = normalizeUpstreamConfigs(rawState.upstreams, rawState.runtimeMode);
+
+  return {
+    passwordSalt: rawState.passwordSalt,
+    passwordHash: rawState.passwordHash,
+    relayTokens: normalizeRelayTokens(rawState.relayTokens, rawState.relayToken),
+    displayOrigin: normalizeDisplayOrigin(rawState.displayOrigin),
+    activeUpstreamId: resolveActiveUpstreamId(rawState.activeUpstreamId, upstreams),
+    upstreams,
+    updatedAt: rawState.updatedAt || new Date().toISOString(),
+  };
+}
+
+async function saveSecurityState(state) {
+  const normalizedState = normalizePanelState(state);
   await fs.mkdir(dataDir, { recursive: true });
   await fs.writeFile(accountFile, JSON.stringify(normalizedState, null, 2), "utf8");
 }
@@ -131,28 +170,10 @@ async function saveSecurityState(state) {
 async function loadSecurityState() {
   try {
     const content = await fs.readFile(accountFile, "utf8");
-    const state = JSON.parse(content);
+    const parsed = JSON.parse(content);
+    const normalizedState = normalizePanelState(parsed);
 
-    if (!state.passwordSalt || !state.passwordHash) {
-      throw new Error("Security file is invalid.");
-    }
-
-    const normalizedState = {
-      passwordSalt: state.passwordSalt,
-      passwordHash: state.passwordHash,
-      relayTokens: normalizeRelayTokens(state.relayTokens, state.relayToken),
-      runtimeMode: normalizeRuntimeMode(state.runtimeMode),
-      displayOrigin: normalizeDisplayOrigin(state.displayOrigin),
-      updatedAt: state.updatedAt || new Date().toISOString(),
-    };
-
-    const changed =
-      !state.relayTokens ||
-      state.displayOrigin !== normalizedState.displayOrigin ||
-      state.runtimeMode !== normalizedState.runtimeMode ||
-      JSON.stringify(state.relayTokens || {}) !== JSON.stringify(normalizedState.relayTokens);
-
-    if (changed) {
+    if (JSON.stringify(parsed) !== JSON.stringify(normalizedState)) {
       await saveSecurityState(normalizedState);
     }
 
@@ -162,7 +183,9 @@ async function loadSecurityState() {
       throw error;
     }
 
-    const defaultState = createSecurityState(DEFAULT_PASSWORD);
+    const defaultState = createSecurityState(DEFAULT_PASSWORD, {
+      activeUpstreamId: getDefaultUpstreamId(),
+    });
     await saveSecurityState(defaultState);
     return defaultState;
   }
@@ -180,10 +203,7 @@ async function verifyPasswordLogin(password) {
 
 async function updatePassword({ currentPassword, newPassword }) {
   const state = await loadSecurityState();
-  const valid = safeCompare(
-    hashPassword(currentPassword, state.passwordSalt),
-    state.passwordHash,
-  );
+  const valid = safeCompare(hashPassword(currentPassword, state.passwordSalt), state.passwordHash);
 
   if (!valid) {
     throw new Error("Current password is incorrect.");
@@ -201,8 +221,9 @@ async function updatePassword({ currentPassword, newPassword }) {
 
   const nextState = createSecurityState(password, {
     relayTokens: state.relayTokens,
-    runtimeMode: state.runtimeMode,
     displayOrigin: state.displayOrigin,
+    activeUpstreamId: state.activeUpstreamId,
+    upstreams: state.upstreams,
   });
   await saveSecurityState(nextState);
   return {
@@ -221,8 +242,7 @@ async function listRelayUsers() {
 
 async function getRelayToken(userKey = DEFAULT_USER_KEY) {
   const state = await loadSecurityState();
-  const normalizedUserKey = normalizeUserKey(userKey);
-  return state.relayTokens[normalizedUserKey];
+  return state.relayTokens[normalizeUserKey(userKey)];
 }
 
 async function resolveRelayUserByToken(token) {
@@ -232,17 +252,7 @@ async function resolveRelayUserByToken(token) {
   }
 
   const state = await loadSecurityState();
-  const user = RELAY_USERS.find((item) => safeCompare(candidate, state.relayTokens[item.key]));
-  return user || null;
-}
-
-async function validateRelayToken(token) {
-  return Boolean(await resolveRelayUserByToken(token));
-}
-
-async function getRuntimeMode() {
-  const state = await loadSecurityState();
-  return state.runtimeMode;
+  return RELAY_USERS.find((item) => safeCompare(candidate, state.relayTokens[item.key])) || null;
 }
 
 async function getDisplayOrigin() {
@@ -250,66 +260,119 @@ async function getDisplayOrigin() {
   return state.displayOrigin || "";
 }
 
-async function updateRuntimeMode(runtimeMode) {
-  return updatePanelSettings({ runtimeMode });
+async function getActiveUpstreamId() {
+  const state = await loadSecurityState();
+  return state.activeUpstreamId;
+}
+
+async function getUpstreamConfig(upstreamId) {
+  const state = await loadSecurityState();
+  const resolvedUpstreamId = upstreamId || state.activeUpstreamId;
+  return state.upstreams[resolvedUpstreamId] || null;
+}
+
+async function listUpstreamConfigs() {
+  const state = await loadSecurityState();
+
+  return listUpstreamModules().map((module) => ({
+    id: module.manifest.id,
+    label: module.manifest.label,
+    description: module.manifest.description || "",
+    settingFields: Array.isArray(module.manifest.settingFields) ? module.manifest.settingFields : [],
+    config: state.upstreams[module.manifest.id],
+    active: state.activeUpstreamId === module.manifest.id,
+  }));
 }
 
 async function updatePanelSettings(settings = {}) {
   const state = await loadSecurityState();
-  const nextMode = normalizeRuntimeMode(
-    settings.runtimeMode === undefined ? state.runtimeMode : settings.runtimeMode,
-  );
-  const rawDisplayOrigin =
-    settings.displayOrigin === undefined ? state.displayOrigin : settings.displayOrigin;
-  const nextDisplayOrigin = normalizeDisplayOrigin(rawDisplayOrigin);
-
-  if ((rawDisplayOrigin || "").toString().trim() && !nextDisplayOrigin) {
-    throw new Error("Display origin is invalid.");
-  }
-
-  if (state.runtimeMode === nextMode && state.displayOrigin === nextDisplayOrigin) {
-    return {
-      runtimeMode: nextMode,
-      displayOrigin: nextDisplayOrigin,
-      updatedAt: state.updatedAt,
-    };
-  }
-
   const nextState = {
     ...state,
-    runtimeMode: nextMode,
-    displayOrigin: nextDisplayOrigin,
-    updatedAt: new Date().toISOString(),
+    relayTokens: normalizeRelayTokens(state.relayTokens),
+    upstreams: { ...state.upstreams },
   };
+
+  if (settings.displayOrigin !== undefined) {
+    const normalizedDisplayOrigin = normalizeDisplayOrigin(settings.displayOrigin);
+    if ((settings.displayOrigin || "").toString().trim() && !normalizedDisplayOrigin) {
+      throw new Error("Display origin is invalid.");
+    }
+    nextState.displayOrigin = normalizedDisplayOrigin;
+  }
+
+  if (settings.activeUpstreamId !== undefined) {
+    const module = getUpstreamModule(settings.activeUpstreamId);
+    if (!module) {
+      throw new Error("Active upstream is invalid.");
+    }
+    nextState.activeUpstreamId = module.manifest.id;
+  }
+
+  const targetUpstreamId = settings.upstreamId || nextState.activeUpstreamId;
+  if (targetUpstreamId) {
+    const module = getUpstreamModule(targetUpstreamId);
+    if (!module) {
+      throw new Error("Upstream is invalid.");
+    }
+
+    const currentConfig = nextState.upstreams[targetUpstreamId] || module.normalizeSettings({});
+    const mergedConfig = {
+      ...currentConfig,
+      runtimeMode:
+        settings.runtimeMode === undefined ? currentConfig.runtimeMode : settings.runtimeMode,
+      trafficThresholdPercent:
+        settings.trafficThresholdPercent === undefined
+          ? currentConfig.trafficThresholdPercent
+          : settings.trafficThresholdPercent,
+      maxRegistrationAgeMinutes:
+        settings.maxRegistrationAgeMinutes === undefined
+          ? currentConfig.maxRegistrationAgeMinutes
+          : settings.maxRegistrationAgeMinutes,
+      inviteCode:
+        settings.inviteCode === undefined ? currentConfig.inviteCode : settings.inviteCode,
+      settings: {
+        ...(currentConfig.settings || {}),
+        ...(settings.providerSettings && typeof settings.providerSettings === "object"
+          ? settings.providerSettings
+          : {}),
+      },
+      enabled: settings.enabled === undefined ? currentConfig.enabled : Boolean(settings.enabled),
+    };
+
+    nextState.upstreams[targetUpstreamId] = module.normalizeSettings(mergedConfig);
+  }
+
+  nextState.activeUpstreamId = resolveActiveUpstreamId(nextState.activeUpstreamId, nextState.upstreams);
+  nextState.updatedAt = new Date().toISOString();
+
   await saveSecurityState(nextState);
   return {
-    runtimeMode: nextState.runtimeMode,
+    activeUpstreamId: nextState.activeUpstreamId,
     displayOrigin: nextState.displayOrigin,
     updatedAt: nextState.updatedAt,
+    upstreamConfig: nextState.upstreams[nextState.activeUpstreamId],
   };
 }
 
 module.exports = {
   DEFAULT_PASSWORD,
-  DEFAULT_RUNTIME_MODE,
   DEFAULT_USER_KEY,
   RELAY_USERS,
   RUNTIME_MODES,
   USER_KEYS,
   accountFile,
+  getActiveUpstreamId,
   getDisplayOrigin,
   getRelayToken,
-  getRuntimeMode,
+  getUpstreamConfig,
   isUserKey,
   listRelayUsers,
+  listUpstreamConfigs,
   loadSecurityState,
   normalizeDisplayOrigin,
-  normalizeRuntimeMode,
   normalizeUserKey,
   resolveRelayUserByToken,
   updatePanelSettings,
   updatePassword,
-  updateRuntimeMode,
-  validateRelayToken,
   verifyPasswordLogin,
 };

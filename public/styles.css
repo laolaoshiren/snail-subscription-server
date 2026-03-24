@@ -166,6 +166,10 @@ small {
   z-index: 8;
 }
 
+#sharedUserPanel.sticky-panel {
+  top: 170px;
+}
+
 .subscription-grid {
   display: grid;
   grid-template-columns: 340px minmax(0, 1fr);
@@ -253,7 +257,8 @@ input:focus {
 .primary-button,
 .ghost-button,
 .tab-button,
-.user-chip {
+.user-chip,
+.upstream-chip {
   border: 0;
   border-radius: 999px;
   padding: 11px 16px;
@@ -268,13 +273,15 @@ input:focus {
 
 .ghost-button,
 .tab-button,
-.user-chip {
+.user-chip,
+.upstream-chip {
   background: rgba(145, 167, 191, 0.1);
   color: var(--text);
 }
 
 .tab-button.active,
-.user-chip.active {
+.user-chip.active,
+.upstream-chip.active {
   background: rgba(56, 189, 248, 0.18);
   color: #b9edff;
 }
@@ -282,7 +289,8 @@ input:focus {
 .primary-button:hover,
 .ghost-button:hover,
 .tab-button:hover,
-.user-chip:hover {
+.user-chip:hover,
+.upstream-chip:hover {
   transform: translateY(-1px);
 }
 
@@ -293,21 +301,24 @@ input:focus {
   cursor: wait;
 }
 
-.user-switcher {
+.user-switcher,
+.upstream-switcher {
   display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
   gap: 10px;
   margin-top: 16px;
 }
 
-.user-chip {
+.user-chip,
+.upstream-chip {
   display: grid;
   gap: 4px;
   text-align: left;
   padding: 14px 16px;
 }
 
-.user-chip small {
+.user-chip small,
+.upstream-chip small {
   color: var(--muted);
   font-size: 0.8rem;
 }
@@ -422,6 +433,52 @@ input:focus {
   align-items: flex-start;
   gap: 12px;
   padding: 14px 16px;
+}
+
+.checkbox-row {
+  display: flex !important;
+  align-items: center;
+  gap: 12px;
+  padding: 2px 2px 2px 0;
+}
+
+.checkbox-row input {
+  width: 18px;
+  height: 18px;
+  margin: 0;
+}
+
+.provider-settings {
+  display: grid;
+  gap: 12px;
+}
+
+.provider-field {
+  display: grid;
+  gap: 8px;
+}
+
+.provider-field small {
+  color: var(--muted);
+  line-height: 1.5;
+}
+
+.tool-block {
+  margin-top: 20px;
+  padding: 16px;
+  border-radius: 18px;
+  background: var(--panel-soft);
+  border: 1px solid rgba(145, 167, 191, 0.1);
+}
+
+.tool-block strong {
+  display: block;
+}
+
+.tool-block p {
+  margin: 8px 0 14px;
+  color: var(--muted);
+  line-height: 1.55;
 }
 
 .option-card input {

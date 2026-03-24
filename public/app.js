@@ -7,6 +7,7 @@ const registerForm = document.querySelector("#registerForm");
 const passwordForm = document.querySelector("#passwordForm");
 const settingsForm = document.querySelector("#settingsForm");
 const logoutButton = document.querySelector("#logoutButton");
+const reloadUpstreamsButton = document.querySelector("#reloadUpstreamsButton");
 const statusBar = document.querySelector("#statusBar");
 const linksList = document.querySelector("#linksList");
 const emptyState = document.querySelector("#emptyState");
@@ -14,8 +15,10 @@ const tabButtons = Array.from(document.querySelectorAll("[data-tab]"));
 const subscriptionTab = document.querySelector("#subscriptionTab");
 const logsTab = document.querySelector("#logsTab");
 const settingsTab = document.querySelector("#settingsTab");
+const sharedUpstreamPanel = document.querySelector("#sharedUpstreamPanel");
 const sharedUserPanel = document.querySelector("#sharedUserPanel");
 const userSwitcher = document.querySelector("#userSwitcher");
+const upstreamSwitcher = document.querySelector("#upstreamSwitcher");
 const usageGrid = document.querySelector("#usageGrid");
 const usageEmptyState = document.querySelector("#usageEmptyState");
 const historyList = document.querySelector("#historyList");
@@ -25,10 +28,19 @@ const metaEmail = document.querySelector("#metaEmail");
 const metaPassword = document.querySelector("#metaPassword");
 const metaInviteCode = document.querySelector("#metaInviteCode");
 const metaCreatedAt = document.querySelector("#metaCreatedAt");
+const metaAccountCreatedAt = document.querySelector("#metaAccountCreatedAt");
+const metaExpiredAt = document.querySelector("#metaExpiredAt");
 const metaUpstreamSite = document.querySelector("#metaUpstreamSite");
 const activeUserLabel = document.querySelector("#activeUserLabel");
+const activeUpstreamLabel = document.querySelector("#activeUpstreamLabel");
 const modeDescription = document.querySelector("#modeDescription");
+const settingsDescription = document.querySelector("#settingsDescription");
 const displayOriginInput = document.querySelector("#displayOrigin");
+const upstreamEnabledInput = document.querySelector("#upstreamEnabled");
+const upstreamInviteCodeInput = document.querySelector("#upstreamInviteCode");
+const trafficThresholdInput = document.querySelector("#trafficThresholdPercent");
+const maxRegistrationAgeInput = document.querySelector("#maxRegistrationAgeMinutes");
+const providerSettingsFields = document.querySelector("#providerSettingsFields");
 
 const loginButton = document.querySelector("#loginButton");
 const registerButton = document.querySelector("#registerButton");
@@ -45,14 +57,13 @@ const protocolLabels = {
 };
 
 const state = {
-  runtimeMode: "always_refresh",
-  trafficThresholdPercent: 20,
   displayOrigin: "",
   users: [],
+  upstreams: [],
   relayUrlsByUser: {},
   userSummaries: [],
   currentUserKey: "userA",
-  currentPayload: null,
+  activeUpstreamId: "",
 };
 
 async function copyText(value) {
@@ -99,19 +110,21 @@ function toggleHidden(element, shouldHide) {
 }
 
 function setText(element, value) {
-  if (!element) {
-    return;
+  if (element) {
+    element.textContent = value;
   }
-
-  element.textContent = value;
 }
 
 function setInputValue(element, value) {
-  if (!element) {
-    return;
+  if (element) {
+    element.value = value;
   }
+}
 
-  element.value = value;
+function setCheckboxValue(element, value) {
+  if (element) {
+    element.checked = Boolean(value);
+  }
 }
 
 function setLoading(button, loadingText, active) {
@@ -164,6 +177,19 @@ function activateTab(tabName) {
   });
 }
 
+function syncStickyOffsets() {
+  if (!sharedUserPanel) {
+    return;
+  }
+
+  if (!sharedUpstreamPanel || window.innerWidth <= 720) {
+    sharedUserPanel.style.top = "";
+    return;
+  }
+
+  sharedUserPanel.style.top = `${sharedUpstreamPanel.offsetHeight + 26}px`;
+}
+
 function showLogin() {
   toggleHidden(loginView, false);
   toggleHidden(dashboardView, true);
@@ -175,15 +201,31 @@ function showDashboard() {
   activateTab("subscription");
 }
 
+function getActiveUpstream() {
+  return (
+    state.upstreams.find((item) => item.id === state.activeUpstreamId) ||
+    state.upstreams[0] || {
+      id: state.activeUpstreamId,
+      label: "默认上游",
+      description: "",
+      config: {
+        runtimeMode: "always_refresh",
+        trafficThresholdPercent: 20,
+        maxRegistrationAgeMinutes: 0,
+        inviteCode: "",
+        enabled: true,
+        settings: {},
+      },
+      settingFields: [],
+    }
+  );
+}
+
 function findCurrentUser() {
   return state.users.find((user) => user.key === state.currentUserKey) || state.users[0] || {
     key: state.currentUserKey,
     label: "用户",
   };
-}
-
-function getCurrentSummary() {
-  return state.userSummaries.find((item) => item.key === state.currentUserKey) || null;
 }
 
 function formatDateTime(value) {
@@ -224,12 +266,17 @@ function formatPercent(value) {
   return `${value.toFixed(2)}%`;
 }
 
-function describeMode(runtimeMode) {
-  if (runtimeMode === "smart_usage") {
-    return `当前是智能模式：只有客户端拉取和管理查看才会查上游，剩余流量低于 ${state.trafficThresholdPercent}% 时才重新注册。`;
+function describeMode(upstream) {
+  const config = upstream?.config || {};
+  if (config.runtimeMode === "smart_usage") {
+    const ageText =
+      Number(config.maxRegistrationAgeMinutes) > 0
+        ? `，或账号年龄超过 ${config.maxRegistrationAgeMinutes} 分钟`
+        : "";
+    return `智能模式：仅在客户端拉取或管理查看时查询上游；当剩余流量低于 ${config.trafficThresholdPercent}%${ageText} 时重新注册。`;
   }
 
-  return "当前是兼容模式：客户端每次拉取订阅都会直接重新注册上游账号。";
+  return "兼容模式：客户端每次拉取订阅都会直接重新注册上游账号，不做查询判断。";
 }
 
 function selectRuntimeMode(runtimeMode) {
@@ -246,13 +293,13 @@ function selectRuntimeMode(runtimeMode) {
 function fillMeta(registration) {
   setText(metaEmail, registration?.email || "暂无");
   setText(metaPassword, registration?.password || "暂无");
-  setText(metaInviteCode, registration?.inviteCode || "无");
+  setText(metaInviteCode, registration?.inviteCode || "暂无");
+  setText(metaCreatedAt, registration?.createdAt ? formatDateTime(registration.createdAt) : "暂无");
   setText(
-    metaCreatedAt,
-    registration?.createdAt
-    ? formatDateTime(registration.createdAt)
-    : "暂无",
+    metaAccountCreatedAt,
+    registration?.accountCreatedAt ? formatDateTime(registration.accountCreatedAt) : "暂无",
   );
+  setText(metaExpiredAt, registration?.expiredAt ? formatDateTime(registration.expiredAt) : "暂无");
   setText(metaUpstreamSite, registration?.upstreamSite || registration?.entryUrl || "暂无");
 }
 
@@ -324,6 +371,7 @@ function renderUsage(usage) {
     ["已用流量", formatBytes(usage.usedTotal)],
     ["剩余流量", formatBytes(usage.remainingTraffic)],
     ["剩余比例", formatPercent(usage.remainingPercent)],
+    ["上游创建时间", formatDateTime(usage.accountCreatedAt)],
     ["到期时间", formatDateTime(usage.expiredAt)],
     ["最近登录", formatDateTime(usage.lastLoginAt)],
   ];
@@ -358,11 +406,13 @@ function buildHistoryMeta(entry) {
   }
 
   if (entry.decision === "register") {
-    parts.push("已换号");
+    parts.push("已重新注册");
   } else if (entry.decision === "reuse") {
     parts.push("继续复用");
   } else if (entry.decision === "low-traffic") {
-    parts.push("低流量预警");
+    parts.push("流量不足");
+  } else if (entry.decision === "expired") {
+    parts.push("达到续期时间");
   }
 
   if (typeof entry.usage?.remainingPercent === "number") {
@@ -392,7 +442,7 @@ function renderHistory(history) {
 
     const metaText = buildHistoryMeta(entry);
     const registrationTime = entry.registration?.createdAt
-      ? `上游注册时间：${formatDateTime(entry.registration.createdAt)}`
+      ? `注册时间：${formatDateTime(entry.registration.createdAt)}`
       : "";
     const usageText =
       typeof entry.usage?.usedTotal === "number" && typeof entry.usage?.transferEnable === "number"
@@ -434,18 +484,20 @@ function updateSummaryFromPayload(payload) {
       return nextSummary;
     }
 
-    return state.userSummaries.find((item) => item.key === user.key) || {
-      key: user.key,
-      label: user.label,
-      hasRegistration: false,
-      createdAt: "",
-      updatedAt: "",
-      remainingPercent: null,
-      remainingTraffic: null,
-      transferEnable: null,
-      queriedAt: "",
-      lastAction: "",
-    };
+    return (
+      state.userSummaries.find((item) => item.key === user.key) || {
+        key: user.key,
+        label: user.label,
+        hasRegistration: false,
+        createdAt: "",
+        updatedAt: "",
+        remainingPercent: null,
+        remainingTraffic: null,
+        transferEnable: null,
+        queriedAt: "",
+        lastAction: "",
+      }
+    );
   });
 }
 
@@ -479,40 +531,143 @@ function renderUserSwitcher() {
       renderUserSwitcher();
       await loadUserState();
     });
+
     userSwitcher.appendChild(button);
   });
 }
 
+async function switchActiveUpstream(upstreamId) {
+  clearStatus();
+  try {
+    await requestJson("/api/settings", {
+      method: "POST",
+      body: JSON.stringify({ activeUpstreamId: upstreamId }),
+    });
+    await refreshSession();
+    setStatus(`已切换到 ${getActiveUpstream().label}。`, "success");
+  } catch (error) {
+    if (error.status === 401) {
+      showLogin();
+      setStatus("登录状态已失效，请重新输入密码。", "error");
+      return;
+    }
+
+    setStatus(error.message, "error");
+  }
+}
+
+function renderUpstreamSwitcher() {
+  if (!upstreamSwitcher) {
+    return;
+  }
+
+  upstreamSwitcher.innerHTML = "";
+
+  state.upstreams.forEach((upstream) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = `upstream-chip${upstream.id === state.activeUpstreamId ? " active" : ""}`;
+
+    const modeText =
+      upstream.config?.runtimeMode === "smart_usage" ? "智能模式" : "兼容模式";
+    const statusText = upstream.config?.enabled === false ? "已停用" : modeText;
+
+    button.innerHTML = `<strong>${upstream.label}</strong><small>${statusText}</small>`;
+    button.addEventListener("click", async () => {
+      if (upstream.id === state.activeUpstreamId) {
+        return;
+      }
+
+      await switchActiveUpstream(upstream.id);
+    });
+
+    upstreamSwitcher.appendChild(button);
+  });
+
+  syncStickyOffsets();
+}
+
+function renderProviderSettingsFields(upstream) {
+  if (!providerSettingsFields) {
+    return;
+  }
+
+  providerSettingsFields.innerHTML = "";
+  const fields = Array.isArray(upstream?.settingFields) ? upstream.settingFields : [];
+  const providerSettings = upstream?.config?.settings || {};
+
+  fields.forEach((field) => {
+    const wrapper = document.createElement("label");
+    wrapper.className = "provider-field";
+    const title = document.createElement("span");
+    title.textContent = field.label || field.key;
+
+    const input = document.createElement("input");
+    input.type = "text";
+    input.name = `provider_${field.key}`;
+    input.dataset.providerKey = field.key;
+    input.placeholder = field.placeholder || "";
+    input.value = providerSettings[field.key] || "";
+
+    const description = document.createElement("small");
+    description.textContent = field.description || "";
+
+    wrapper.append(title, input, description);
+    providerSettingsFields.appendChild(wrapper);
+  });
+}
+
+function syncSettingsForm() {
+  const upstream = getActiveUpstream();
+  const config = upstream.config || {};
+
+  setText(activeUpstreamLabel, upstream.label || "默认上游");
+  setText(modeDescription, describeMode(upstream));
+  setText(
+    settingsDescription,
+    `${upstream.label || "当前上游"} 的设置会直接影响固定服务器中转链接的实际行为。`,
+  );
+
+  setInputValue(displayOriginInput, state.displayOrigin || "");
+  setCheckboxValue(upstreamEnabledInput, config.enabled !== false);
+  setInputValue(upstreamInviteCodeInput, config.inviteCode || "");
+  setInputValue(trafficThresholdInput, config.trafficThresholdPercent ?? 20);
+  setInputValue(maxRegistrationAgeInput, config.maxRegistrationAgeMinutes ?? 0);
+  selectRuntimeMode(config.runtimeMode || "always_refresh");
+  renderProviderSettingsFields(upstream);
+}
+
 function applySession(payload) {
-  state.runtimeMode = payload.runtimeMode || state.runtimeMode;
-  state.trafficThresholdPercent = payload.trafficThresholdPercent || state.trafficThresholdPercent;
   state.displayOrigin = payload.displayOrigin || "";
   state.users = Array.isArray(payload.users) ? payload.users : [];
+  state.upstreams = Array.isArray(payload.upstreams) ? payload.upstreams : [];
   state.relayUrlsByUser = payload.relayUrlsByUser || {};
   state.userSummaries = Array.isArray(payload.userSummaries) ? payload.userSummaries : [];
+  state.activeUpstreamId = payload.activeUpstreamId || state.upstreams[0]?.id || "";
 
-  const hasCurrent = state.users.some((user) => user.key === state.currentUserKey);
-  if (!hasCurrent) {
+  const hasCurrentUser = state.users.some((user) => user.key === state.currentUserKey);
+  if (!hasCurrentUser) {
     state.currentUserKey = payload.defaultUserKey || state.users[0]?.key || "userA";
   }
 
   setText(activeUserLabel, findCurrentUser().label);
-  setText(modeDescription, describeMode(state.runtimeMode));
-  selectRuntimeMode(state.runtimeMode);
-  setInputValue(displayOriginInput, state.displayOrigin);
+  renderUpstreamSwitcher();
   renderUserSwitcher();
+  syncSettingsForm();
 }
 
 function applyUserPayload(payload) {
-  state.currentPayload = payload;
-  state.runtimeMode = payload.runtimeMode || state.runtimeMode;
-  state.trafficThresholdPercent = payload.trafficThresholdPercent || state.trafficThresholdPercent;
-  setInputValue(displayOriginInput, state.displayOrigin);
-  state.relayUrlsByUser[state.currentUserKey] = payload.relayUrls || state.relayUrlsByUser[state.currentUserKey];
+  const upstream = payload.upstream || getActiveUpstream();
+  if (upstream?.id) {
+    state.activeUpstreamId = upstream.id;
+  }
+
+  state.relayUrlsByUser[state.currentUserKey] =
+    payload.relayUrls || state.relayUrlsByUser[state.currentUserKey];
 
   setText(activeUserLabel, payload.user?.label || findCurrentUser().label);
-  setText(modeDescription, describeMode(state.runtimeMode));
-  selectRuntimeMode(state.runtimeMode);
+  setText(activeUpstreamLabel, upstream?.label || getActiveUpstream().label);
+  setText(modeDescription, describeMode(upstream));
 
   fillMeta(payload.registration);
   renderLinks(payload.relayUrls || state.relayUrlsByUser[state.currentUserKey] || null);
@@ -525,10 +680,11 @@ function applyUserPayload(payload) {
 async function loadUserState() {
   const user = findCurrentUser();
   setText(activeUserLabel, user.label);
+  setText(activeUpstreamLabel, getActiveUpstream().label);
 
   try {
     const payload = await requestJson(
-      `/api/subscriptions/latest?type=full&user=${encodeURIComponent(state.currentUserKey)}`,
+      `/api/subscriptions/latest?type=full&user=${encodeURIComponent(state.currentUserKey)}&upstreamId=${encodeURIComponent(state.activeUpstreamId)}`,
     );
     applyUserPayload(payload);
 
@@ -569,134 +725,163 @@ async function refreshSession() {
 
 if (loginForm) {
   loginForm.addEventListener("submit", async (event) => {
-  event.preventDefault();
-  clearStatus();
-  setLoading(loginButton, "登录中...", true);
+    event.preventDefault();
+    clearStatus();
+    setLoading(loginButton, "登录中...", true);
 
-  const formData = new FormData(loginForm);
-  const password = (formData.get("password") || "").toString();
+    const formData = new FormData(loginForm);
+    const password = (formData.get("password") || "").toString();
 
-  try {
-    await requestJson("/api/login", {
-      method: "POST",
-      body: JSON.stringify({ password }),
-    });
+    try {
+      await requestJson("/api/login", {
+        method: "POST",
+        body: JSON.stringify({ password }),
+      });
 
-    setStatus("登录成功。", "success");
-    await refreshSession();
-  } catch (error) {
-    setStatus(error.message, "error");
-  } finally {
-    setLoading(loginButton, "登录中...", false);
-  }
+      setStatus("登录成功。", "success");
+      await refreshSession();
+    } catch (error) {
+      setStatus(error.message, "error");
+    } finally {
+      setLoading(loginButton, "登录中...", false);
+    }
   });
 }
 
 if (registerForm) {
   registerForm.addEventListener("submit", async (event) => {
-  event.preventDefault();
-  clearStatus();
-  setLoading(registerButton, "处理中...", true);
+    event.preventDefault();
+    clearStatus();
+    setLoading(registerButton, "处理中...", true);
 
-  const formData = new FormData(registerForm);
-  const inviteCode = (formData.get("inviteCode") || "").toString().trim();
+    const formData = new FormData(registerForm);
+    const inviteCode = (formData.get("inviteCode") || "").toString().trim();
 
-  try {
-    const payload = await requestJson("/api/subscriptions", {
-      method: "POST",
-      body: JSON.stringify({
-        type: "full",
-        inviteCode,
-        userKey: state.currentUserKey,
-      }),
-    });
+    try {
+      const payload = await requestJson("/api/subscriptions", {
+        method: "POST",
+        body: JSON.stringify({
+          type: "full",
+          inviteCode,
+          userKey: state.currentUserKey,
+          upstreamId: state.activeUpstreamId,
+        }),
+      });
 
-    applyUserPayload(payload);
-    setStatus(`${findCurrentUser().label} 已重新注册新的上游账号。`, "success");
-  } catch (error) {
-    if (error.status === 401) {
-      showLogin();
-      setStatus("登录状态已失效，请重新输入密码。", "error");
-      return;
+      applyUserPayload(payload);
+      setStatus(`${findCurrentUser().label} 已在 ${getActiveUpstream().label} 下完成重新注册。`, "success");
+    } catch (error) {
+      if (error.status === 401) {
+        showLogin();
+        setStatus("登录状态已失效，请重新输入密码。", "error");
+        return;
+      }
+
+      setStatus(error.message, "error");
+    } finally {
+      setLoading(registerButton, "处理中...", false);
     }
-
-    setStatus(error.message, "error");
-  } finally {
-    setLoading(registerButton, "处理中...", false);
-  }
   });
 }
 
 if (settingsForm) {
   settingsForm.addEventListener("submit", async (event) => {
-  event.preventDefault();
-  clearStatus();
-  setLoading(saveSettingsButton, "保存中...", true);
+    event.preventDefault();
+    clearStatus();
+    setLoading(saveSettingsButton, "保存中...", true);
 
-  const formData = new FormData(settingsForm);
-  const runtimeMode = (formData.get("runtimeMode") || "").toString();
-  const displayOrigin = (formData.get("displayOrigin") || "").toString().trim();
-
-  try {
-    const payload = await requestJson("/api/settings", {
-      method: "POST",
-      body: JSON.stringify({ runtimeMode, displayOrigin }),
+    const formData = new FormData(settingsForm);
+    const providerSettings = {};
+    Array.from(providerSettingsFields?.querySelectorAll("[data-provider-key]") || []).forEach((input) => {
+      providerSettings[input.dataset.providerKey] = input.value.trim();
     });
 
-    state.runtimeMode = payload.runtimeMode;
-    state.displayOrigin = payload.displayOrigin || "";
-    state.trafficThresholdPercent = payload.trafficThresholdPercent || state.trafficThresholdPercent;
-    setText(modeDescription, describeMode(state.runtimeMode));
-    selectRuntimeMode(state.runtimeMode);
-    setInputValue(displayOriginInput, state.displayOrigin);
-    await refreshSession();
-    setStatus("运行模式已更新。", "success");
-  } catch (error) {
-    if (error.status === 401) {
-      showLogin();
-      setStatus("登录状态已失效，请重新输入密码。", "error");
-      return;
-    }
+    try {
+      await requestJson("/api/settings", {
+        method: "POST",
+        body: JSON.stringify({
+          displayOrigin: (formData.get("displayOrigin") || "").toString().trim(),
+          upstreamId: state.activeUpstreamId,
+          enabled: upstreamEnabledInput?.checked,
+          inviteCode: (formData.get("inviteCode") || "").toString().trim(),
+          runtimeMode: (formData.get("runtimeMode") || "").toString(),
+          trafficThresholdPercent: Number.parseInt(formData.get("trafficThresholdPercent"), 10),
+          maxRegistrationAgeMinutes: Number.parseInt(formData.get("maxRegistrationAgeMinutes"), 10),
+          providerSettings,
+        }),
+      });
 
-    setStatus(error.message, "error");
-  } finally {
-    setLoading(saveSettingsButton, "保存中...", false);
-  }
+      await refreshSession();
+      setStatus("当前上游设置已更新。", "success");
+    } catch (error) {
+      if (error.status === 401) {
+        showLogin();
+        setStatus("登录状态已失效，请重新输入密码。", "error");
+        return;
+      }
+
+      setStatus(error.message, "error");
+    } finally {
+      setLoading(saveSettingsButton, "保存中...", false);
+    }
   });
 }
 
 if (passwordForm) {
   passwordForm.addEventListener("submit", async (event) => {
-  event.preventDefault();
-  clearStatus();
-  setLoading(savePasswordButton, "保存中...", true);
+    event.preventDefault();
+    clearStatus();
+    setLoading(savePasswordButton, "保存中...", true);
 
-  const formData = new FormData(passwordForm);
-  const currentPassword = (formData.get("currentPassword") || "").toString();
-  const newPassword = (formData.get("newPassword") || "").toString();
+    const formData = new FormData(passwordForm);
+    const currentPassword = (formData.get("currentPassword") || "").toString();
+    const newPassword = (formData.get("newPassword") || "").toString();
 
-  try {
-    await requestJson("/api/password", {
-      method: "POST",
-      body: JSON.stringify({
-        currentPassword,
-        newPassword,
-      }),
-    });
+    try {
+      await requestJson("/api/password", {
+        method: "POST",
+        body: JSON.stringify({
+          currentPassword,
+          newPassword,
+        }),
+      });
 
-    passwordForm.reset();
-    setStatus("面板密码已更新。", "success");
-  } catch (error) {
-    if (error.status === 401) {
-      showLogin();
-      setStatus("登录状态已失效，请重新输入密码。", "error");
-      return;
+      passwordForm.reset();
+      setStatus("面板密码已更新。", "success");
+    } catch (error) {
+      if (error.status === 401) {
+        showLogin();
+        setStatus("登录状态已失效，请重新输入密码。", "error");
+        return;
+      }
+
+      setStatus(error.message, "error");
+    } finally {
+      setLoading(savePasswordButton, "保存中...", false);
     }
+  });
+}
 
-    setStatus(error.message, "error");
-  } finally {
-    setLoading(savePasswordButton, "保存中...", false);
-  }
+if (reloadUpstreamsButton) {
+  reloadUpstreamsButton.addEventListener("click", async () => {
+    clearStatus();
+    setLoading(reloadUpstreamsButton, "重载中...", true);
+
+    try {
+      await requestJson("/api/upstreams/reload", { method: "POST" });
+      await refreshSession();
+      setStatus("上游模块已重新加载。", "success");
+    } catch (error) {
+      if (error.status === 401) {
+        showLogin();
+        setStatus("登录状态已失效，请重新输入密码。", "error");
+        return;
+      }
+
+      setStatus(error.message, "error");
+    } finally {
+      setLoading(reloadUpstreamsButton, "重载中...", false);
+    }
   });
 }
 
@@ -722,6 +907,10 @@ tabButtons.forEach((button) => {
   button.addEventListener("click", () => {
     activateTab(button.dataset.tab);
   });
+});
+
+window.addEventListener("resize", () => {
+  syncStickyOffsets();
 });
 
 refreshSession();

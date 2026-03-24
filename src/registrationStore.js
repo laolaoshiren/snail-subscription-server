@@ -4,17 +4,16 @@ const crypto = require("node:crypto");
 const fs = require("node:fs/promises");
 const path = require("node:path");
 
-const dataDir = path.join(__dirname, "..", "data");
+const { USER_KEYS } = require("./authStore");
+const { dataDir } = require("./dataPaths");
+const { getDefaultUpstreamId } = require("./upstreams/core/registry");
+
 const relayStateFile = path.join(dataDir, "relay-state.json");
 const latestRegistrationFile = path.join(dataDir, "latest-registration.json");
-const DEFAULT_USER_KEYS = ["userA", "userB", "userC", "userD", "userE"];
+const STATE_VERSION = 2;
 const MAX_HISTORY_ITEMS = 120;
 
-async function ensureDataDir() {
-  await fs.mkdir(dataDir, { recursive: true });
-}
-
-function createEmptyUserState() {
+function createEmptyRegistrationState() {
   return {
     latestRegistration: null,
     latestUsage: null,
@@ -23,13 +22,21 @@ function createEmptyUserState() {
   };
 }
 
+function createEmptyUserState() {
+  return {
+    upstreams: {},
+    updatedAt: null,
+  };
+}
+
 function createBaseState() {
   const users = {};
-  DEFAULT_USER_KEYS.forEach((userKey) => {
+  USER_KEYS.forEach((userKey) => {
     users[userKey] = createEmptyUserState();
   });
 
   return {
+    version: STATE_VERSION,
     users,
     updatedAt: new Date().toISOString(),
   };
@@ -40,13 +47,15 @@ function normalizeHistoryEntry(entry) {
     return null;
   }
 
-  return {
-    id: typeof entry.id === "string" && entry.id.trim()
-      ? entry.id.trim()
-      : crypto.randomBytes(8).toString("hex"),
-    timestamp: typeof entry.timestamp === "string" && entry.timestamp.trim()
-      ? entry.timestamp.trim()
-      : new Date().toISOString(),
+  const normalized = {
+    id:
+      typeof entry.id === "string" && entry.id.trim()
+        ? entry.id.trim()
+        : crypto.randomBytes(8).toString("hex"),
+    timestamp:
+      typeof entry.timestamp === "string" && entry.timestamp.trim()
+        ? entry.timestamp.trim()
+        : new Date().toISOString(),
     action: (entry.action || "info").toString(),
     title: (entry.title || "").toString(),
     message: (entry.message || "").toString(),
@@ -54,17 +63,26 @@ function normalizeHistoryEntry(entry) {
     decision: entry.decision ? entry.decision.toString() : "",
     relayType: entry.relayType ? entry.relayType.toString() : "",
     requestSource: entry.requestSource ? entry.requestSource.toString() : "",
+    upstreamId: entry.upstreamId ? entry.upstreamId.toString() : "",
     usage: entry.usage && typeof entry.usage === "object" ? entry.usage : null,
     registration:
       entry.registration && typeof entry.registration === "object" ? entry.registration : null,
     details: entry.details && typeof entry.details === "object" ? entry.details : null,
   };
+
+  if (normalized.action === "migration") {
+    normalized.title = "已迁移旧版记录";
+    normalized.message = "检测到旧版单用户数据，已自动迁移到当前默认上游。";
+  }
+
+  return normalized;
 }
 
-function normalizeUserState(userState) {
-  const state = userState && typeof userState === "object" ? userState : {};
-  const history = Array.isArray(state.history)
-    ? state.history
+function normalizeRegistrationState(registrationState) {
+  const source = registrationState && typeof registrationState === "object" ? registrationState : {};
+
+  const history = Array.isArray(source.history)
+    ? source.history
         .map(normalizeHistoryEntry)
         .filter(Boolean)
         .sort((left, right) => new Date(right.timestamp) - new Date(left.timestamp))
@@ -73,61 +91,110 @@ function normalizeUserState(userState) {
 
   return {
     latestRegistration:
-      state.latestRegistration && typeof state.latestRegistration === "object"
-        ? state.latestRegistration
+      source.latestRegistration && typeof source.latestRegistration === "object"
+        ? source.latestRegistration
         : null,
-    latestUsage:
-      state.latestUsage && typeof state.latestUsage === "object" ? state.latestUsage : null,
+    latestUsage: source.latestUsage && typeof source.latestUsage === "object" ? source.latestUsage : null,
     history,
-    updatedAt: typeof state.updatedAt === "string" ? state.updatedAt : null,
+    updatedAt: typeof source.updatedAt === "string" ? source.updatedAt : null,
+  };
+}
+
+function isNestedUserState(userState) {
+  return Boolean(userState && typeof userState === "object" && userState.upstreams && typeof userState.upstreams === "object");
+}
+
+function normalizeLegacyUserState(userState, upstreamId) {
+  const normalized = normalizeRegistrationState(userState);
+  if (!normalized.latestRegistration && !normalized.latestUsage && normalized.history.length === 0) {
+    return createEmptyUserState();
+  }
+
+  return {
+    upstreams: {
+      [upstreamId]: normalized,
+    },
+    updatedAt: normalized.updatedAt,
+  };
+}
+
+function normalizeUserState(userState, defaultUpstreamId) {
+  if (!isNestedUserState(userState)) {
+    return normalizeLegacyUserState(userState, defaultUpstreamId);
+  }
+
+  const source = userState && typeof userState === "object" ? userState : {};
+  const upstreams = {};
+  const sourceUpstreams = source.upstreams && typeof source.upstreams === "object" ? source.upstreams : {};
+
+  Object.entries(sourceUpstreams).forEach(([upstreamId, registrationState]) => {
+    if (!upstreamId) {
+      return;
+    }
+
+    upstreams[upstreamId] = normalizeRegistrationState(registrationState);
+  });
+
+  return {
+    upstreams,
+    updatedAt: typeof source.updatedAt === "string" ? source.updatedAt : null,
   };
 }
 
 function normalizeRelayState(parsed) {
   const baseState = createBaseState();
-  const sourceUsers =
-    parsed && typeof parsed === "object" && parsed.users && typeof parsed.users === "object"
-      ? parsed.users
-      : {};
-
+  const source = parsed && typeof parsed === "object" ? parsed : {};
+  const defaultUpstreamId = getDefaultUpstreamId();
+  const sourceUsers = source.users && typeof source.users === "object" ? source.users : {};
   const normalizedUsers = {};
-  const userKeys = Array.from(new Set([...DEFAULT_USER_KEYS, ...Object.keys(sourceUsers)]));
+  const userKeys = Array.from(new Set([...USER_KEYS, ...Object.keys(sourceUsers)]));
 
   userKeys.forEach((userKey) => {
-    normalizedUsers[userKey] = normalizeUserState(sourceUsers[userKey]);
+    normalizedUsers[userKey] = normalizeUserState(sourceUsers[userKey], defaultUpstreamId);
   });
 
   return {
+    version: STATE_VERSION,
     users: normalizedUsers,
-    updatedAt:
-      parsed && typeof parsed.updatedAt === "string" ? parsed.updatedAt : baseState.updatedAt,
+    updatedAt: typeof source.updatedAt === "string" ? source.updatedAt : baseState.updatedAt,
   };
 }
 
+async function ensureDataDir() {
+  await fs.mkdir(dataDir, { recursive: true });
+}
+
 async function writeRelayState(state) {
+  const normalized = normalizeRelayState(state);
   await ensureDataDir();
-  const normalizedState = normalizeRelayState(state);
-  await fs.writeFile(relayStateFile, JSON.stringify(normalizedState, null, 2), "utf8");
-  return normalizedState;
+  await fs.writeFile(relayStateFile, JSON.stringify(normalized, null, 2), "utf8");
+  return normalized;
 }
 
 async function migrateLegacyState() {
   const state = createBaseState();
+  const defaultUpstreamId = getDefaultUpstreamId();
 
   try {
     const content = await fs.readFile(latestRegistrationFile, "utf8");
     const legacyRecord = JSON.parse(content);
     state.users.userA = {
-      latestRegistration: legacyRecord,
-      latestUsage: null,
-      history: [
-        normalizeHistoryEntry({
-          action: "migration",
-          title: "已迁移旧版记录",
-          message: "检测到旧版单用户记录，已自动迁移到 用户A。",
-          registration: legacyRecord,
-        }),
-      ],
+      upstreams: {
+        [defaultUpstreamId]: {
+          latestRegistration: legacyRecord,
+          latestUsage: null,
+          history: [
+            normalizeHistoryEntry({
+              action: "migration",
+              title: "已迁移旧版记录",
+              message: "检测到旧版单用户记录，已自动迁移到 用户A / 默认上游。",
+              registration: legacyRecord,
+              upstreamId: defaultUpstreamId,
+            }),
+          ],
+          updatedAt: legacyRecord.createdAt || new Date().toISOString(),
+        },
+      },
       updatedAt: legacyRecord.createdAt || new Date().toISOString(),
     };
   } catch (error) {
@@ -142,7 +209,14 @@ async function migrateLegacyState() {
 async function loadRelayState() {
   try {
     const content = await fs.readFile(relayStateFile, "utf8");
-    return normalizeRelayState(JSON.parse(content));
+    const parsed = JSON.parse(content);
+    const normalized = normalizeRelayState(parsed);
+
+    if (JSON.stringify(parsed) !== JSON.stringify(normalized)) {
+      await writeRelayState(normalized);
+    }
+
+    return normalized;
   } catch (error) {
     if (error.code === "ENOENT") {
       return migrateLegacyState();
@@ -161,7 +235,20 @@ function ensureUserState(state, userKey) {
     state.users[userKey] = createEmptyUserState();
   }
 
+  if (!state.users[userKey].upstreams || typeof state.users[userKey].upstreams !== "object") {
+    state.users[userKey].upstreams = {};
+  }
+
   return state.users[userKey];
+}
+
+function ensureUserUpstreamState(state, userKey, upstreamId) {
+  const userState = ensureUserState(state, userKey);
+  if (!userState.upstreams[upstreamId]) {
+    userState.upstreams[upstreamId] = createEmptyRegistrationState();
+  }
+
+  return userState.upstreams[upstreamId];
 }
 
 async function updateRelayState(mutator) {
@@ -172,95 +259,61 @@ async function updateRelayState(mutator) {
   return writeRelayState(draft);
 }
 
-async function getUserState(userKey) {
+async function getUserState(userKey, upstreamId = getDefaultUpstreamId()) {
   const state = await loadRelayState();
-  return state.users[userKey] ? normalizeUserState(state.users[userKey]) : createEmptyUserState();
+  const userState = ensureUserState(state, userKey);
+  return normalizeRegistrationState(userState.upstreams[upstreamId]);
 }
 
-async function loadLatestRegistration(userKey = "userA") {
-  const userState = await getUserState(userKey);
-  return userState.latestRegistration;
+async function listUserStates(upstreamId = getDefaultUpstreamId()) {
+  const state = await loadRelayState();
+
+  return Object.entries(state.users).map(([userKey, userState]) => ({
+    userKey,
+    ...normalizeRegistrationState(userState.upstreams?.[upstreamId]),
+  }));
 }
 
-async function saveLatestRegistration(userKey, record) {
-  let normalizedUserKey = userKey;
-  let normalizedRecord = record;
-
-  if (record === undefined && userKey && typeof userKey === "object") {
-    normalizedUserKey = "userA";
-    normalizedRecord = userKey;
-  }
-
-  await updateRelayState(async (state) => {
-    const userState = ensureUserState(state, normalizedUserKey || "userA");
-    userState.latestRegistration = normalizedRecord && typeof normalizedRecord === "object"
-      ? normalizedRecord
-      : null;
-    userState.updatedAt = new Date().toISOString();
+async function appendUserHistory(userKey, upstreamId, entry) {
+  const normalizedEntry = normalizeHistoryEntry({
+    ...entry,
+    upstreamId,
   });
-}
-
-async function saveLatestUsage(userKey, usage) {
-  await updateRelayState(async (state) => {
-    const userState = ensureUserState(state, userKey || "userA");
-    userState.latestUsage = usage && typeof usage === "object" ? usage : null;
-    userState.updatedAt = new Date().toISOString();
-  });
-}
-
-async function appendUserHistory(userKey, entry) {
-  const normalizedEntry = normalizeHistoryEntry(entry);
   if (!normalizedEntry) {
     return;
   }
 
   await updateRelayState(async (state) => {
-    const userState = ensureUserState(state, userKey || "userA");
-    userState.history = [normalizedEntry, ...(Array.isArray(userState.history) ? userState.history : [])]
+    const registrationState = ensureUserUpstreamState(state, userKey, upstreamId);
+    registrationState.history = [
+      normalizedEntry,
+      ...(Array.isArray(registrationState.history) ? registrationState.history : []),
+    ]
       .map(normalizeHistoryEntry)
       .filter(Boolean)
       .slice(0, MAX_HISTORY_ITEMS);
-    userState.updatedAt = new Date().toISOString();
+    registrationState.updatedAt = new Date().toISOString();
+    ensureUserState(state, userKey).updatedAt = registrationState.updatedAt;
   });
 }
 
-async function replaceUserState(userKey, nextUserState) {
+async function updateUserState(userKey, upstreamId, mutator) {
   await updateRelayState(async (state) => {
-    state.users[userKey] = normalizeUserState(nextUserState);
-    state.users[userKey].updatedAt = new Date().toISOString();
+    const registrationState = ensureUserUpstreamState(state, userKey, upstreamId);
+    const draftRegistrationState = cloneState(registrationState);
+    await mutator(draftRegistrationState);
+    const normalized = normalizeRegistrationState(draftRegistrationState);
+    normalized.updatedAt = new Date().toISOString();
+    ensureUserState(state, userKey).upstreams[upstreamId] = normalized;
+    ensureUserState(state, userKey).updatedAt = normalized.updatedAt;
   });
-}
-
-async function updateUserState(userKey, mutator) {
-  await updateRelayState(async (state) => {
-    const currentUserState = ensureUserState(state, userKey);
-    const draftUserState = cloneState(currentUserState);
-    await mutator(draftUserState);
-    state.users[userKey] = normalizeUserState(draftUserState);
-    state.users[userKey].updatedAt = new Date().toISOString();
-  });
-}
-
-async function listUserStates() {
-  const state = await loadRelayState();
-
-  return Object.entries(state.users).map(([userKey, userState]) => ({
-    userKey,
-    ...normalizeUserState(userState),
-  }));
 }
 
 module.exports = {
-  dataDir,
-  latestRegistrationFile,
-  loadLatestRegistration,
-  loadRelayState,
-  relayStateFile,
-  replaceUserState,
-  saveLatestRegistration,
-  saveLatestUsage,
   appendUserHistory,
   getUserState,
   listUserStates,
+  loadRelayState,
+  relayStateFile,
   updateUserState,
 };
