@@ -246,15 +246,15 @@ ask_password() {
     return
   fi
 
-  if [ "${INSTALL_MODE}" = "update" ] && [ -f "${APP_DIR}/data/account.json" ]; then
-    answer="$(prompt_secret '设置面板密码，直接回车保留当前密码: ')"
+  if [ "${INSTALL_MODE}" = "update" ] && [ -f "${DATA_DIR}/account.json" ]; then
+    answer="$(prompt_text '设置面板密码，直接回车保留当前密码: ')"
     if [ -z "${answer}" ]; then
       PANEL_PASSWORD_RESULT=""
       PASSWORD_CHANGED="0"
       return
     fi
   else
-    answer="$(prompt_secret '设置面板密码，直接回车将自动生成随机密码: ')"
+    answer="$(prompt_text '设置面板密码，直接回车将自动生成随机密码: ')"
     if [ -z "${answer}" ]; then
       answer="$(random_password)"
       log "未输入面板密码，已自动生成随机密码"

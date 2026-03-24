@@ -8,6 +8,12 @@ function normalizeString(value) {
 }
 
 function createSnailVendor(options = {}) {
+  const defaultSettings = {
+    entryUrl: normalizeString(options.defaultSettings?.entryUrl),
+    officialSiteUrl: normalizeString(options.defaultSettings?.officialSiteUrl),
+    apiBase: normalizeString(options.defaultSettings?.apiBase),
+  };
+
   return defineUpstreamModule({
     manifest: {
       id: options.id,
@@ -51,9 +57,9 @@ function createSnailVendor(options = {}) {
       subscriptionUpdateIntervalMinutes: 30,
       inviteCode: "",
       settings: {
-        entryUrl: "",
-        officialSiteUrl: "",
-        apiBase: "",
+        entryUrl: defaultSettings.entryUrl,
+        officialSiteUrl: defaultSettings.officialSiteUrl,
+        apiBase: defaultSettings.apiBase,
       },
     },
     normalizeProviderSettings(settings = {}) {
@@ -72,6 +78,9 @@ function createSnailVendor(options = {}) {
         entryUrl: upstreamConfig.settings.entryUrl,
         officialSiteUrl: upstreamConfig.settings.officialSiteUrl,
         apiBase: upstreamConfig.settings.apiBase,
+        defaultEntryUrl: defaultSettings.entryUrl,
+        defaultOfficialSites: defaultSettings.officialSiteUrl ? [defaultSettings.officialSiteUrl] : [],
+        defaultApiBase: defaultSettings.apiBase,
         verbose: vendorOptions.verbose,
         logger: vendorOptions.logger,
       });
@@ -91,6 +100,9 @@ function createSnailVendor(options = {}) {
         upstreamSite: record.upstreamSite || upstreamConfig.settings.officialSiteUrl,
         officialSiteUrl: upstreamConfig.settings.officialSiteUrl,
         entryUrl: record.entryUrl || upstreamConfig.settings.entryUrl,
+        defaultEntryUrl: defaultSettings.entryUrl,
+        defaultOfficialSites: defaultSettings.officialSiteUrl ? [defaultSettings.officialSiteUrl] : [],
+        defaultApiBase: defaultSettings.apiBase,
         detectorConfigUrl: record.detectorConfigUrl,
         upstreamSource: record.upstreamSource,
         verbose: vendorOptions.verbose,

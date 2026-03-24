@@ -18,6 +18,11 @@ const execFileAsync = promisify(execFile);
 const packageFile = path.join(repoRoot, "package.json");
 const APP_CHECK_TTL_MS = 1000 * 60 * 2;
 const CLOUD_CHECK_TTL_MS = 1000 * 60 * 2;
+const DEFAULT_UPDATE_REPO_OWNER = trimGitRefValue(process.env.SNAIL_UPDATE_REPO_OWNER || "laolaoshiren") || "laolaoshiren";
+const DEFAULT_UPDATE_REPO_NAME =
+  trimGitRefValue(process.env.SNAIL_UPDATE_REPO_NAME || "snail-subscription-server") ||
+  "snail-subscription-server";
+const DEFAULT_UPDATE_BRANCH = trimGitRefValue(process.env.SNAIL_UPDATE_BRANCH || "main") || "main";
 
 const cacheState = {
   localInfo: null,
@@ -107,9 +112,56 @@ function buildCloudRemoteUrl(config) {
   return `https://github.com/${config.repoOwner}/${config.repoName}.git`;
 }
 
+function buildAppRemoteUrl(config = {}) {
+  return `https://github.com/${config.repoOwner}/${config.repoName}.git`;
+}
+
 function ensureShortCommit(commit) {
   const value = trimGitRefValue(commit);
   return value ? value.slice(0, 7) : "";
+}
+
+function getReadonlyUpdateContext() {
+  return {
+    remoteName: "github",
+    remoteUrl: buildAppRemoteUrl({
+      repoOwner: DEFAULT_UPDATE_REPO_OWNER,
+      repoName: DEFAULT_UPDATE_REPO_NAME,
+    }),
+    remoteLabel: `${DEFAULT_UPDATE_REPO_OWNER}/${DEFAULT_UPDATE_REPO_NAME}`,
+    branch: DEFAULT_UPDATE_BRANCH,
+    repoOwner: DEFAULT_UPDATE_REPO_OWNER,
+    repoName: DEFAULT_UPDATE_REPO_NAME,
+  };
+}
+
+async function fetchJsonWithHeaders(url, headers = {}) {
+  const response = await fetch(url, {
+    headers: {
+      Accept: "application/json",
+      "User-Agent": "snail-subscription-server",
+      ...headers,
+    },
+  });
+
+  if (!response.ok) {
+    throw new Error(`Request failed with status ${response.status}.`);
+  }
+
+  return response.json();
+}
+
+async function fetchReadonlyRemotePackageMeta(context) {
+  const url = `https://raw.githubusercontent.com/${context.repoOwner}/${context.repoName}/${context.branch}/package.json`;
+  return fetchJsonWithHeaders(url);
+}
+
+async function fetchReadonlyRemoteCommit(context) {
+  const url = `https://api.github.com/repos/${context.repoOwner}/${context.repoName}/commits/${context.branch}`;
+  const payload = await fetchJsonWithHeaders(url, {
+    "X-GitHub-Api-Version": "2022-11-28",
+  });
+  return trimGitRefValue(payload?.sha || "");
 }
 
 function buildDefaultAppStatus(localInfo, systemState) {
@@ -230,6 +282,29 @@ async function getLocalRepositoryInfo(force = false) {
   return localInfo;
 }
 
+async function getReadonlyLocalInfo(force = false) {
+  if (!force && cacheState.localInfo && Date.now() - cacheState.localInfoAt < APP_CHECK_TTL_MS) {
+    return cacheState.localInfo;
+  }
+
+  const packageMeta = await readPackageMeta(packageFile);
+  const context = getReadonlyUpdateContext();
+  const localInfo = {
+    name: packageMeta.name,
+    version: packageMeta.version,
+    commit: trimGitRefValue(process.env.SNAIL_BUILD_COMMIT || ""),
+    shortCommit: ensureShortCommit(process.env.SNAIL_BUILD_COMMIT || ""),
+    branch: context.branch,
+    remoteName: context.remoteName,
+    remoteUrl: context.remoteUrl,
+    remoteLabel: context.remoteLabel,
+  };
+
+  cacheState.localInfo = localInfo;
+  cacheState.localInfoAt = Date.now();
+  return localInfo;
+}
+
 async function hasLocalChanges() {
   const result = await runGit(["status", "--porcelain"]);
   return trimGitRefValue(result.stdout).length > 0;
@@ -254,8 +329,114 @@ async function buildAppUpdateStatus(force = false) {
   }
 
   const systemState = await loadSystemState();
-  const localInfo = await getLocalRepositoryInfo(force);
-  const fallback = buildDefaultAppStatus(localInfo, systemState);
+  let localInfo;
+  let fallback;
+
+  try {
+    localInfo = await getLocalRepositoryInfo(force);
+    fallback = buildDefaultAppStatus(localInfo, systemState);
+  } catch (error) {
+    localInfo = await getReadonlyLocalInfo(force);
+    fallback = {
+      supported: false,
+      checking: false,
+      updating: false,
+      checkedAt: systemState?.appUpdate?.lastCheckedAt || "",
+      lastUpdatedAt: systemState?.appUpdate?.lastUpdatedAt || "",
+      lastError: "",
+      source: {
+        remoteName: localInfo.remoteName || "",
+        remoteLabel: localInfo.remoteLabel || "",
+        branch: localInfo.branch || "",
+      },
+      current: {
+        version: localInfo.version || "0.0.0",
+        commit: localInfo.commit || "",
+        shortCommit: localInfo.shortCommit || "",
+      },
+      currentVersion: localInfo.version || "0.0.0",
+      currentCommitSha: localInfo.commit || "",
+      latest: {
+        version: systemState?.appUpdate?.latestVersion || localInfo.version || "0.0.0",
+        commit: systemState?.appUpdate?.latestCommitSha || "",
+        shortCommit: ensureShortCommit(systemState?.appUpdate?.latestCommitSha || ""),
+      },
+      latestVersion: systemState?.appUpdate?.latestVersion || localInfo.version || "0.0.0",
+      latestCommitSha: systemState?.appUpdate?.latestCommitSha || "",
+      updateAvailable: Boolean(systemState?.appUpdate?.updateAvailable),
+      canFastForward: false,
+      hasLocalChanges: false,
+      commitsAhead: 0,
+      commitsBehind: 0,
+    };
+
+    try {
+      const context = getReadonlyUpdateContext();
+      const [remotePackage, remoteCommit] = await Promise.all([
+        fetchReadonlyRemotePackageMeta(context),
+        fetchReadonlyRemoteCommit(context),
+      ]);
+      const checkedAt = new Date().toISOString();
+      const latestVersion = trimGitRefValue(remotePackage?.version || "") || fallback.currentVersion;
+      const latestCommitSha = trimGitRefValue(remoteCommit);
+      const updateAvailable =
+        latestVersion !== fallback.currentVersion ||
+        (latestCommitSha && fallback.currentCommitSha && latestCommitSha !== fallback.currentCommitSha);
+      const payload = {
+        ...fallback,
+        checkedAt,
+        latest: {
+          version: latestVersion,
+          commit: latestCommitSha,
+          shortCommit: ensureShortCommit(latestCommitSha),
+        },
+        latestVersion,
+        latestCommitSha,
+        updateAvailable,
+      };
+      cacheState.appStatus = payload;
+      cacheState.appStatusAt = Date.now();
+      await updateSystemState({
+        appUpdate: {
+          supported: false,
+          mode: "readonly",
+          currentVersion: payload.currentVersion,
+          currentCommitSha: payload.currentCommitSha,
+          latestVersion: payload.latestVersion,
+          latestCommitSha: payload.latestCommitSha,
+          updateAvailable: payload.updateAvailable,
+          checking: false,
+          updating: false,
+          lastCheckedAt: checkedAt,
+          lastError: "",
+        },
+      });
+      return payload;
+    } catch (readonlyError) {
+      const payload = {
+        ...fallback,
+        lastError: readonlyError.message || error.message,
+      };
+      cacheState.appStatus = payload;
+      cacheState.appStatusAt = Date.now();
+      await updateSystemState({
+        appUpdate: {
+          supported: false,
+          mode: "readonly",
+          currentVersion: payload.currentVersion,
+          currentCommitSha: payload.currentCommitSha,
+          latestVersion: payload.latestVersion,
+          latestCommitSha: payload.latestCommitSha,
+          updateAvailable: false,
+          checking: false,
+          updating: false,
+          lastCheckedAt: new Date().toISOString(),
+          lastError: payload.lastError,
+        },
+      });
+      return payload;
+    }
+  }
 
   try {
     const context = await getRepositoryContext();
@@ -379,6 +560,10 @@ async function runSystemUpdate() {
     const status = await buildAppUpdateStatus(true);
     if (status.lastError) {
       throw new Error(status.lastError);
+    }
+
+    if (!status.supported) {
+      throw new Error("The current deployment can only check versions and cannot update automatically.");
     }
 
     if (!status.updateAvailable) {

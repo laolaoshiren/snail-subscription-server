@@ -620,9 +620,20 @@ async function readJsonBody(request) {
     return {};
   }
 
+  const contentType = ((request.headers["content-type"] || "").toString().split(";")[0] || "")
+    .trim()
+    .toLowerCase();
+
+  if (contentType === "application/x-www-form-urlencoded") {
+    return Object.fromEntries(new URLSearchParams(raw).entries());
+  }
+
   try {
     return JSON.parse(raw);
   } catch (error) {
+    if (raw.includes("=")) {
+      return Object.fromEntries(new URLSearchParams(raw).entries());
+    }
     throw new Error("Request body must be valid JSON.");
   }
 }

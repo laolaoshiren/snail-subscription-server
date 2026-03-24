@@ -5,6 +5,7 @@ const dashboardView = document.querySelector("#dashboardView");
 const loginForm = document.querySelector("#loginForm");
 const loginUsername = document.querySelector("#loginUsername");
 const loginPassword = document.querySelector("#loginPassword");
+const loginPasswordVisible = document.querySelector("#loginPasswordVisible");
 const loginHint = document.querySelector("#loginHint");
 const registerForm = document.querySelector("#registerForm");
 const upstreamForm = document.querySelector("#upstreamForm");
@@ -1389,6 +1390,12 @@ if (loginForm) {
 }
 
 renderLoginHint();
+
+if (loginPasswordVisible && loginPassword) {
+  loginPasswordVisible.addEventListener("change", () => {
+    loginPassword.type = loginPasswordVisible.checked ? "text" : "password";
+  });
+}
 
 if (registerForm) {
   registerForm.addEventListener("submit", async (event) => {

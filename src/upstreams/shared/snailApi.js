@@ -67,7 +67,15 @@ function uniqueStrings(values) {
 
 async function resolveUpstreamConfig(options = {}) {
   const logger = createLogger(options.verbose !== false, options.logger);
-  const entryUrl = options.entryUrl || process.env.UPSTREAM_ENTRY_URL || DEFAULT_UPSTREAM_ENTRY_URL;
+  const defaultEntryUrl =
+    options.defaultEntryUrl || options.entryUrl || process.env.UPSTREAM_ENTRY_URL || DEFAULT_UPSTREAM_ENTRY_URL;
+  const defaultApiBase =
+    options.defaultApiBase || options.apiBase || process.env.API_BASE || DEFAULT_API_BASE;
+  const defaultOfficialSites = uniqueStrings([
+    ...(Array.isArray(options.defaultOfficialSites) ? options.defaultOfficialSites : []),
+    ...(Array.isArray(DEFAULT_OFFICIAL_SITES) ? DEFAULT_OFFICIAL_SITES : []),
+  ]);
+  const entryUrl = options.entryUrl || process.env.UPSTREAM_ENTRY_URL || defaultEntryUrl;
   const detectorConfigUrl = buildUrl(entryUrl, "/config.json");
 
   if (options.apiBase || process.env.API_BASE) {
@@ -82,7 +90,7 @@ async function resolveUpstreamConfig(options = {}) {
 
   const candidates = [
     options.officialSiteUrl || process.env.OFFICIAL_SITE_URL || "",
-    ...DEFAULT_OFFICIAL_SITES,
+    ...defaultOfficialSites,
   ];
 
   try {
@@ -113,12 +121,12 @@ async function resolveUpstreamConfig(options = {}) {
     }
   }
 
-  logger.log(`[upstream] Falling back to default API base: ${DEFAULT_API_BASE}`);
+  logger.log(`[upstream] Falling back to default API base: ${defaultApiBase}`);
   return {
     entryUrl,
     detectorConfigUrl,
     siteBase: "",
-    apiBase: DEFAULT_API_BASE,
+    apiBase: defaultApiBase,
     source: "fallback",
   };
 }
@@ -324,18 +332,31 @@ async function querySubscriptionStatus(options = {}) {
   const upstream =
     options.apiBase || options.entryUrl || options.officialSiteUrl
       ? {
-          entryUrl: options.entryUrl || process.env.UPSTREAM_ENTRY_URL || DEFAULT_UPSTREAM_ENTRY_URL,
+          entryUrl:
+            options.entryUrl ||
+            process.env.UPSTREAM_ENTRY_URL ||
+            options.defaultEntryUrl ||
+            DEFAULT_UPSTREAM_ENTRY_URL,
           detectorConfigUrl:
             options.detectorConfigUrl ||
-            buildUrl(options.entryUrl || process.env.UPSTREAM_ENTRY_URL || DEFAULT_UPSTREAM_ENTRY_URL, "/config.json"),
+            buildUrl(
+              options.entryUrl ||
+                process.env.UPSTREAM_ENTRY_URL ||
+                options.defaultEntryUrl ||
+                DEFAULT_UPSTREAM_ENTRY_URL,
+              "/config.json",
+            ),
           siteBase: options.upstreamSite || options.officialSiteUrl || "",
-          apiBase: options.apiBase || DEFAULT_API_BASE,
+          apiBase: options.apiBase || options.defaultApiBase || DEFAULT_API_BASE,
           source: options.upstreamSource || "record",
         }
       : await resolveUpstreamConfig({
           entryUrl: options.entryUrl,
           officialSiteUrl: options.officialSiteUrl,
           apiBase: options.apiBase,
+          defaultEntryUrl: options.defaultEntryUrl,
+          defaultOfficialSites: options.defaultOfficialSites,
+          defaultApiBase: options.defaultApiBase,
           verbose: options.verbose,
           logger: options.logger,
         });
@@ -413,6 +434,9 @@ async function registerAndFetchSubscribe(options = {}) {
     entryUrl: options.entryUrl,
     officialSiteUrl: options.officialSiteUrl,
     apiBase: options.apiBase,
+    defaultEntryUrl: options.defaultEntryUrl,
+    defaultOfficialSites: options.defaultOfficialSites,
+    defaultApiBase: options.defaultApiBase,
     verbose: options.verbose,
     logger: options.logger,
   });

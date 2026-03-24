@@ -49,6 +49,10 @@ small {
   display: none !important;
 }
 
+.compact-checkbox {
+  margin-top: -6px;
+}
+
 .page-shell {
   min-height: 100vh;
   padding: 12px;
