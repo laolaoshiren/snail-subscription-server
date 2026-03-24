@@ -5,6 +5,7 @@ const fs = require("node:fs/promises");
 const http = require("node:http");
 const path = require("node:path");
 const { URL } = require("node:url");
+const QRCode = require("qrcode");
 
 const { ensureProxyConfigured } = require("./httpClient");
 const {
@@ -1040,6 +1041,43 @@ async function handleCreateSubscription(request, response) {
   });
 }
 
+async function handleGenerateQrCode(request, response) {
+  const body = await readJsonBody(request);
+  const text = typeof body.text === "string" ? body.text.trim() : "";
+
+  if (!text) {
+    sendJson(response, 400, {
+      success: false,
+      error: "QR text is required.",
+    });
+    return;
+  }
+
+  if (text.length > 4096) {
+    sendJson(response, 400, {
+      success: false,
+      error: "QR text is too long.",
+    });
+    return;
+  }
+
+  const dataUrl = await QRCode.toDataURL(text, {
+    type: "image/png",
+    width: 320,
+    margin: 1,
+    errorCorrectionLevel: "M",
+    color: {
+      dark: "#0f172a",
+      light: "#ffffff",
+    },
+  });
+
+  sendJson(response, 200, {
+    success: true,
+    dataUrl,
+  });
+}
+
 async function handleLatestSubscription(request, response, url) {
   const type = normalizeType(url.searchParams.get("type"));
   const userKey = normalizeUserKey(url.searchParams.get("user"));
@@ -1326,6 +1364,11 @@ async function requestListener(request, response) {
 
       if (request.method === "POST" && url.pathname === "/api/system/update") {
         await handleStartAppUpdate(response);
+        return;
+      }
+
+      if (request.method === "POST" && url.pathname === "/api/qrcode") {
+        await handleGenerateQrCode(request, response);
         return;
       }
 

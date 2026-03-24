@@ -23,6 +23,12 @@ const saveUpstreamCloudButton = document.querySelector("#saveUpstreamCloudButton
 const statusBar = document.querySelector("#statusBar");
 const linksList = document.querySelector("#linksList");
 const emptyState = document.querySelector("#emptyState");
+const qrModal = document.querySelector("#qrModal");
+const qrModalTitle = document.querySelector("#qrModalTitle");
+const qrModalImage = document.querySelector("#qrModalImage");
+const qrModalPlaceholder = document.querySelector("#qrModalPlaceholder");
+const qrModalUrl = document.querySelector("#qrModalUrl");
+const qrModalClose = document.querySelector("#qrModalClose");
 const tabButtons = Array.from(document.querySelectorAll("[data-tab]"));
 const subscriptionTab = document.querySelector("#subscriptionTab");
 const logsTab = document.querySelector("#logsTab");
@@ -120,6 +126,7 @@ const state = {
   updateReconnectTimer: null,
 };
 let draggingUpstreamId = "";
+let qrModalRequestToken = 0;
 
 async function copyText(value) {
   if (navigator.clipboard && window.isSecureContext) {
@@ -272,6 +279,7 @@ function activateTab(tabName) {
 }
 
 function showLogin() {
+  closeQrModal();
   toggleHidden(loginView, false);
   toggleHidden(dashboardView, true);
 }
@@ -280,6 +288,83 @@ function showDashboard() {
   toggleHidden(loginView, true);
   toggleHidden(dashboardView, false);
   activateTab(state.currentTab || "subscription");
+}
+
+function resetQrModalContent(message = "生成中...") {
+  if (qrModalImage) {
+    qrModalImage.removeAttribute("src");
+    qrModalImage.alt = "订阅二维码";
+    toggleHidden(qrModalImage, true);
+  }
+
+  if (qrModalPlaceholder) {
+    qrModalPlaceholder.textContent = message;
+    toggleHidden(qrModalPlaceholder, false);
+  }
+}
+
+function closeQrModal() {
+  qrModalRequestToken += 1;
+
+  if (!qrModal) {
+    return;
+  }
+
+  toggleHidden(qrModal, true);
+  setText(qrModalTitle, "订阅二维码");
+  setText(qrModalUrl, "");
+  resetQrModalContent();
+}
+
+async function openQrModal(label, url) {
+  if (!qrModal || !url) {
+    return;
+  }
+
+  const requestToken = qrModalRequestToken + 1;
+  qrModalRequestToken = requestToken;
+
+  setText(qrModalTitle, `${label} 二维码`);
+  setText(qrModalUrl, url);
+  resetQrModalContent("生成中...");
+  toggleHidden(qrModal, false);
+
+  try {
+    const payload = await requestJson("/api/qrcode", {
+      method: "POST",
+      body: JSON.stringify({ text: url }),
+    });
+
+    if (requestToken !== qrModalRequestToken) {
+      return;
+    }
+
+    if (!payload.dataUrl) {
+      throw new Error("二维码生成失败。");
+    }
+
+    if (qrModalImage) {
+      qrModalImage.src = payload.dataUrl;
+      qrModalImage.alt = `${label} 二维码`;
+      toggleHidden(qrModalImage, false);
+    }
+
+    toggleHidden(qrModalPlaceholder, true);
+  } catch (error) {
+    if (requestToken !== qrModalRequestToken) {
+      return;
+    }
+
+    if (error.status === 401) {
+      closeQrModal();
+      showLogin();
+      setStatus("登录状态已失效，请重新输入密码。", "error");
+      return;
+    }
+
+    resetQrModalContent("生成失败，请重试。");
+    setStatus(error.message, "error");
+  }
 }
 
 function createFallbackUpstream(upstreamId = state.activeUpstreamId || state.selectedUpstreamId) {
@@ -628,11 +713,15 @@ function renderLinks(relayUrls, upstream = getActiveUpstream()) {
     const foot = document.createElement("div");
     foot.className = "link-foot";
 
-    const button = document.createElement("button");
-    button.className = "ghost-button small-button";
-    button.type = "button";
-    button.textContent = "复制";
-    button.addEventListener("click", async () => {
+    const actions = document.createElement("div");
+    actions.className = "link-actions";
+
+    const copyButton = document.createElement("button");
+    copyButton.className = "ghost-button small-button";
+    copyButton.type = "button";
+    copyButton.textContent = "复制";
+    copyButton.disabled = !url;
+    copyButton.addEventListener("click", async () => {
       if (!url) {
         return;
       }
@@ -641,7 +730,17 @@ function renderLinks(relayUrls, upstream = getActiveUpstream()) {
       setStatus(`${label} 链接已复制。`, "success");
     });
 
-    foot.append(button);
+    const qrButton = document.createElement("button");
+    qrButton.className = "ghost-button small-button";
+    qrButton.type = "button";
+    qrButton.textContent = "二维码";
+    qrButton.disabled = !url;
+    qrButton.addEventListener("click", async () => {
+      await openQrModal(label, url);
+    });
+
+    actions.append(copyButton, qrButton);
+    foot.append(actions);
     card.append(head, input, foot);
     linksList.appendChild(card);
   });
@@ -1397,6 +1496,26 @@ if (loginPasswordVisible && loginPassword) {
   });
 }
 
+if (qrModalClose) {
+  qrModalClose.addEventListener("click", () => {
+    closeQrModal();
+  });
+}
+
+if (qrModal) {
+  qrModal.addEventListener("click", (event) => {
+    if (event.target === qrModal) {
+      closeQrModal();
+    }
+  });
+}
+
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && qrModal && !qrModal.classList.contains("hidden")) {
+    closeQrModal();
+  }
+});
+
 if (registerForm) {
   registerForm.addEventListener("submit", async (event) => {
     event.preventDefault();
@@ -1748,6 +1867,7 @@ if (syncUpstreamCloudButton) {
 
 if (logoutButton) {
   logoutButton.addEventListener("click", async () => {
+    closeQrModal();
     clearStatus();
 
     try {

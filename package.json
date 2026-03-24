@@ -12,6 +12,7 @@
     "upstreams:check": "node scripts/check-upstreams.js"
   },
   "dependencies": {
+    "qrcode": "^1.5.4",
     "undici": "^7.16.0"
   }
 }

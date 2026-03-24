@@ -448,5 +448,24 @@
         </section>
       </main>
     </div>
+
+    <div id="qrModal" class="qr-modal hidden">
+      <div class="qr-modal-card" role="dialog" aria-modal="true" aria-labelledby="qrModalTitle">
+        <div class="qr-modal-head">
+          <div>
+            <strong id="qrModalTitle">订阅二维码</strong>
+            <p>生成后可直接扫码导入。</p>
+          </div>
+          <button id="qrModalClose" class="ghost-button small-button" type="button">关闭</button>
+        </div>
+
+        <div class="qr-modal-box">
+          <img id="qrModalImage" class="hidden" alt="订阅二维码" />
+          <div id="qrModalPlaceholder" class="qr-modal-placeholder">生成中...</div>
+        </div>
+
+        <div id="qrModalUrl" class="qr-modal-url"></div>
+      </div>
+    </div>
   </body>
 </html>
