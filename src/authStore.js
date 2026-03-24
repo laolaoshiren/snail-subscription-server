@@ -5,6 +5,11 @@ const fs = require("node:fs/promises");
 const path = require("node:path");
 
 const { dataDir } = require("./dataPaths");
+const {
+  backupCorruptedJsonFile,
+  parseJsonWithRecovery,
+  writeJsonFileAtomic,
+} = require("./jsonStateFile");
 const { getDefaultUpstreamId, getUpstreamModule, listUpstreamModules } = require("./upstreams/core/registry");
 
 const accountFile = path.join(dataDir, "account.json");
@@ -35,6 +40,7 @@ const ACTIVE_UPSTREAM_MODES = Object.freeze({
   AGGREGATE: "aggregate",
 });
 const MAX_AGGREGATE_COPIES = 10;
+let securityStateMutationQueue = Promise.resolve();
 const DEFAULT_UPSTREAM_CLOUD = Object.freeze({
   enabled: true,
   autoSync: true,
@@ -328,14 +334,19 @@ function normalizePanelState(rawState = {}) {
 async function saveSecurityState(state) {
   const normalizedState = normalizePanelState(state);
   await fs.mkdir(dataDir, { recursive: true });
-  await fs.writeFile(accountFile, JSON.stringify(normalizedState, null, 2), "utf8");
-  await fs.writeFile(relayTokensFile, JSON.stringify(normalizedState.relayTokens, null, 2), "utf8");
+  await writeJsonFileAtomic(accountFile, normalizedState);
+  await writeJsonFileAtomic(relayTokensFile, normalizedState.relayTokens);
 }
 
 async function loadRelayTokenBackup() {
   try {
     const content = await fs.readFile(relayTokensFile, "utf8");
-    return normalizeRelayTokens(JSON.parse(content));
+    const { value: parsed, recovered } = parseJsonWithRecovery(content);
+    if (recovered) {
+      await backupCorruptedJsonFile(relayTokensFile, content);
+      await writeJsonFileAtomic(relayTokensFile, parsed);
+    }
+    return normalizeRelayTokens(parsed);
   } catch (error) {
     if (error.code === "ENOENT") {
       return null;
@@ -387,12 +398,16 @@ async function loadSecurityState() {
 
   try {
     const content = await fs.readFile(accountFile, "utf8");
-    const parsed = JSON.parse(content);
+    const { value: parsed, recovered } = parseJsonWithRecovery(content);
     const normalizedState = mergeRelayTokens(normalizePanelState(parsed), relayTokenBackup, {
       preferBackup: !hasStoredRelayTokens(parsed),
     });
 
-    if (JSON.stringify(parsed) !== JSON.stringify(normalizedState) || !relayTokenBackup) {
+    if (recovered) {
+      await backupCorruptedJsonFile(accountFile, content);
+    }
+
+    if (recovered || JSON.stringify(parsed) !== JSON.stringify(normalizedState) || !relayTokenBackup) {
       await saveSecurityState(normalizedState);
     }
 
@@ -411,6 +426,12 @@ async function loadSecurityState() {
   }
 }
 
+function enqueueSecurityStateMutation(task) {
+  const nextTask = securityStateMutationQueue.then(task, task);
+  securityStateMutationQueue = nextTask.catch(() => undefined);
+  return nextTask;
+}
+
 async function verifyPasswordLogin(password) {
   const state = await loadSecurityState();
   const valid = safeCompare(hashPassword(password, state.passwordSalt), state.passwordHash);
@@ -427,37 +448,39 @@ async function isDefaultPasswordActive() {
 }
 
 async function updatePassword({ currentPassword, newPassword }) {
-  const state = await loadSecurityState();
-  const valid = safeCompare(hashPassword(currentPassword, state.passwordSalt), state.passwordHash);
+  return enqueueSecurityStateMutation(async () => {
+    const state = await loadSecurityState();
+    const valid = safeCompare(hashPassword(currentPassword, state.passwordSalt), state.passwordHash);
 
-  if (!valid) {
-    throw new Error("Current password is incorrect.");
-  }
+    if (!valid) {
+      throw new Error("Current password is incorrect.");
+    }
 
-  const password = (newPassword || "").trim();
+    const password = (newPassword || "").trim();
 
-  if (!password) {
-    throw new Error("New password cannot be empty.");
-  }
+    if (!password) {
+      throw new Error("New password cannot be empty.");
+    }
 
-  if (password.length < 4) {
-    throw new Error("New password must be at least 4 characters.");
-  }
+    if (password.length < 4) {
+      throw new Error("New password must be at least 4 characters.");
+    }
 
-  const nextState = createSecurityState(password, {
-    relayTokens: state.relayTokens,
-    displayOrigin: state.displayOrigin,
-    activeUpstreamId: state.activeUpstreamId,
-    activeUpstreamMode: state.activeUpstreamMode,
-    upstreamOrder: state.upstreamOrder,
-    upstreams: state.upstreams,
-    upstreamCloud: state.upstreamCloud,
-    upstreamAggregation: state.upstreamAggregation,
+    const nextState = createSecurityState(password, {
+      relayTokens: state.relayTokens,
+      displayOrigin: state.displayOrigin,
+      activeUpstreamId: state.activeUpstreamId,
+      activeUpstreamMode: state.activeUpstreamMode,
+      upstreamOrder: state.upstreamOrder,
+      upstreams: state.upstreams,
+      upstreamCloud: state.upstreamCloud,
+      upstreamAggregation: state.upstreamAggregation,
+    });
+    await saveSecurityState(nextState);
+    return {
+      updatedAt: nextState.updatedAt,
+    };
   });
-  await saveSecurityState(nextState);
-  return {
-    updatedAt: nextState.updatedAt,
-  };
 }
 
 async function listRelayUsers() {
@@ -554,109 +577,111 @@ async function listUpstreamConfigs() {
 }
 
 async function updatePanelSettings(settings = {}) {
-  const state = await loadSecurityState();
-  const nextState = {
-    ...state,
-    relayTokens: normalizeRelayTokens(state.relayTokens),
-    upstreams: { ...state.upstreams },
-  };
+  return enqueueSecurityStateMutation(async () => {
+    const state = await loadSecurityState();
+    const nextState = {
+      ...state,
+      relayTokens: normalizeRelayTokens(state.relayTokens),
+      upstreams: { ...state.upstreams },
+    };
 
-  if (settings.displayOrigin !== undefined) {
-    const normalizedDisplayOrigin = normalizeDisplayOrigin(settings.displayOrigin);
-    if ((settings.displayOrigin || "").toString().trim() && !normalizedDisplayOrigin) {
-      throw new Error("Display origin is invalid.");
+    if (settings.displayOrigin !== undefined) {
+      const normalizedDisplayOrigin = normalizeDisplayOrigin(settings.displayOrigin);
+      if ((settings.displayOrigin || "").toString().trim() && !normalizedDisplayOrigin) {
+        throw new Error("Display origin is invalid.");
+      }
+      nextState.displayOrigin = normalizedDisplayOrigin;
     }
-    nextState.displayOrigin = normalizedDisplayOrigin;
-  }
 
-  if (settings.activeUpstreamId !== undefined) {
-    const module = getUpstreamModule(settings.activeUpstreamId);
-    if (!module) {
-      throw new Error("Active upstream is invalid.");
+    if (settings.activeUpstreamId !== undefined) {
+      const module = getUpstreamModule(settings.activeUpstreamId);
+      if (!module) {
+        throw new Error("Active upstream is invalid.");
+      }
+      nextState.activeUpstreamId = module.manifest.id;
     }
-    nextState.activeUpstreamId = module.manifest.id;
-  }
 
-  if (settings.activeUpstreamMode !== undefined) {
-    nextState.activeUpstreamMode = normalizeActiveUpstreamMode(settings.activeUpstreamMode);
-  }
-
-  if (settings.upstreamOrder !== undefined) {
-    if (!Array.isArray(settings.upstreamOrder)) {
-      throw new Error("Upstream order must be an array.");
+    if (settings.activeUpstreamMode !== undefined) {
+      nextState.activeUpstreamMode = normalizeActiveUpstreamMode(settings.activeUpstreamMode);
     }
-    nextState.upstreamOrder = normalizeUpstreamOrder(settings.upstreamOrder, nextState.upstreams);
-  }
 
-  if (settings.upstreamCloud !== undefined) {
-    nextState.upstreamCloud = normalizeUpstreamCloudSettings({
-      ...nextState.upstreamCloud,
-      ...settings.upstreamCloud,
-    });
-  }
+    if (settings.upstreamOrder !== undefined) {
+      if (!Array.isArray(settings.upstreamOrder)) {
+        throw new Error("Upstream order must be an array.");
+      }
+      nextState.upstreamOrder = normalizeUpstreamOrder(settings.upstreamOrder, nextState.upstreams);
+    }
 
-  if (settings.upstreamAggregation !== undefined) {
+    if (settings.upstreamCloud !== undefined) {
+      nextState.upstreamCloud = normalizeUpstreamCloudSettings({
+        ...nextState.upstreamCloud,
+        ...settings.upstreamCloud,
+      });
+    }
+
+    if (settings.upstreamAggregation !== undefined) {
+      nextState.upstreamAggregation = normalizeUpstreamAggregation(
+        {
+          ...nextState.upstreamAggregation,
+          ...settings.upstreamAggregation,
+          counts:
+            settings.upstreamAggregation && Object.prototype.hasOwnProperty.call(settings.upstreamAggregation, "counts")
+              ? settings.upstreamAggregation.counts
+              : nextState.upstreamAggregation?.counts,
+        },
+        nextState.upstreams,
+        nextState.upstreamOrder,
+        nextState.activeUpstreamId,
+      );
+    }
+
+    const targetUpstreamId = settings.upstreamId || nextState.activeUpstreamId;
+    if (targetUpstreamId) {
+      const module = getUpstreamModule(targetUpstreamId);
+      if (!module) {
+        throw new Error("Upstream is invalid.");
+      }
+
+      const currentConfig = nextState.upstreams[targetUpstreamId] || module.normalizeSettings({});
+      nextState.upstreams[targetUpstreamId] = module.applySettingsPatch(currentConfig, {
+        name: settings.name,
+        remark: settings.remark,
+        enabled: settings.enabled,
+        inviteCode: settings.inviteCode,
+        runtimeMode: settings.runtimeMode,
+        trafficThresholdPercent: settings.trafficThresholdPercent,
+        maxRegistrationAgeMinutes: settings.maxRegistrationAgeMinutes,
+        subscriptionUpdateIntervalMinutes: settings.subscriptionUpdateIntervalMinutes,
+        providerSettings: settings.providerSettings,
+      });
+    }
+
+    nextState.upstreamOrder = normalizeUpstreamOrder(nextState.upstreamOrder, nextState.upstreams);
+    nextState.activeUpstreamId = resolveActiveUpstreamId(
+      nextState.activeUpstreamId,
+      nextState.upstreams,
+      nextState.upstreamOrder,
+    );
     nextState.upstreamAggregation = normalizeUpstreamAggregation(
-      {
-        ...nextState.upstreamAggregation,
-        ...settings.upstreamAggregation,
-        counts:
-          settings.upstreamAggregation && Object.prototype.hasOwnProperty.call(settings.upstreamAggregation, "counts")
-            ? settings.upstreamAggregation.counts
-            : nextState.upstreamAggregation?.counts,
-      },
+      nextState.upstreamAggregation,
       nextState.upstreams,
       nextState.upstreamOrder,
       nextState.activeUpstreamId,
     );
-  }
+    nextState.updatedAt = new Date().toISOString();
 
-  const targetUpstreamId = settings.upstreamId || nextState.activeUpstreamId;
-  if (targetUpstreamId) {
-    const module = getUpstreamModule(targetUpstreamId);
-    if (!module) {
-      throw new Error("Upstream is invalid.");
-    }
-
-    const currentConfig = nextState.upstreams[targetUpstreamId] || module.normalizeSettings({});
-    nextState.upstreams[targetUpstreamId] = module.applySettingsPatch(currentConfig, {
-      name: settings.name,
-      remark: settings.remark,
-      enabled: settings.enabled,
-      inviteCode: settings.inviteCode,
-      runtimeMode: settings.runtimeMode,
-      trafficThresholdPercent: settings.trafficThresholdPercent,
-      maxRegistrationAgeMinutes: settings.maxRegistrationAgeMinutes,
-      subscriptionUpdateIntervalMinutes: settings.subscriptionUpdateIntervalMinutes,
-      providerSettings: settings.providerSettings,
-    });
-  }
-
-  nextState.upstreamOrder = normalizeUpstreamOrder(nextState.upstreamOrder, nextState.upstreams);
-  nextState.activeUpstreamId = resolveActiveUpstreamId(
-    nextState.activeUpstreamId,
-    nextState.upstreams,
-    nextState.upstreamOrder,
-  );
-  nextState.upstreamAggregation = normalizeUpstreamAggregation(
-    nextState.upstreamAggregation,
-    nextState.upstreams,
-    nextState.upstreamOrder,
-    nextState.activeUpstreamId,
-  );
-  nextState.updatedAt = new Date().toISOString();
-
-  await saveSecurityState(nextState);
-  return {
-    activeUpstreamId: nextState.activeUpstreamId,
-    activeUpstreamMode: nextState.activeUpstreamMode,
-    displayOrigin: nextState.displayOrigin,
-    upstreamOrder: nextState.upstreamOrder,
-    upstreamCloud: nextState.upstreamCloud,
-    upstreamAggregation: nextState.upstreamAggregation,
-    updatedAt: nextState.updatedAt,
-    upstreamConfig: nextState.upstreams[nextState.activeUpstreamId],
-  };
+    await saveSecurityState(nextState);
+    return {
+      activeUpstreamId: nextState.activeUpstreamId,
+      activeUpstreamMode: nextState.activeUpstreamMode,
+      displayOrigin: nextState.displayOrigin,
+      upstreamOrder: nextState.upstreamOrder,
+      upstreamCloud: nextState.upstreamCloud,
+      upstreamAggregation: nextState.upstreamAggregation,
+      updatedAt: nextState.updatedAt,
+      upstreamConfig: nextState.upstreams[nextState.activeUpstreamId],
+    };
+  });
 }
 
 module.exports = {

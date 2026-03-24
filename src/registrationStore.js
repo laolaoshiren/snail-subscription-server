@@ -6,12 +6,18 @@ const path = require("node:path");
 
 const { USER_KEYS } = require("./authStore");
 const { dataDir } = require("./dataPaths");
+const {
+  backupCorruptedJsonFile,
+  parseJsonWithRecovery,
+  writeJsonFileAtomic,
+} = require("./jsonStateFile");
 const { getDefaultUpstreamId } = require("./upstreams/core/registry");
 
 const relayStateFile = path.join(dataDir, "relay-state.json");
 const latestRegistrationFile = path.join(dataDir, "latest-registration.json");
 const STATE_VERSION = 2;
 const MAX_HISTORY_ITEMS = 120;
+let relayStateMutationQueue = Promise.resolve();
 
 function createEmptyRegistrationState() {
   return {
@@ -167,7 +173,7 @@ async function ensureDataDir() {
 async function writeRelayState(state) {
   const normalized = normalizeRelayState(state);
   await ensureDataDir();
-  await fs.writeFile(relayStateFile, JSON.stringify(normalized, null, 2), "utf8");
+  await writeJsonFileAtomic(relayStateFile, normalized);
   return normalized;
 }
 
@@ -209,10 +215,14 @@ async function migrateLegacyState() {
 async function loadRelayState() {
   try {
     const content = await fs.readFile(relayStateFile, "utf8");
-    const parsed = JSON.parse(content);
+    const { value: parsed, recovered } = parseJsonWithRecovery(content);
     const normalized = normalizeRelayState(parsed);
 
-    if (JSON.stringify(parsed) !== JSON.stringify(normalized)) {
+    if (recovered) {
+      await backupCorruptedJsonFile(relayStateFile, content);
+    }
+
+    if (recovered || JSON.stringify(parsed) !== JSON.stringify(normalized)) {
       await writeRelayState(normalized);
     }
 
@@ -228,6 +238,12 @@ async function loadRelayState() {
 
 function cloneState(state) {
   return JSON.parse(JSON.stringify(state));
+}
+
+function enqueueRelayStateMutation(task) {
+  const nextTask = relayStateMutationQueue.then(task, task);
+  relayStateMutationQueue = nextTask.catch(() => undefined);
+  return nextTask;
 }
 
 function ensureUserState(state, userKey) {
@@ -252,11 +268,13 @@ function ensureUserUpstreamState(state, userKey, upstreamId) {
 }
 
 async function updateRelayState(mutator) {
-  const currentState = await loadRelayState();
-  const draft = cloneState(currentState);
-  await mutator(draft);
-  draft.updatedAt = new Date().toISOString();
-  return writeRelayState(draft);
+  return enqueueRelayStateMutation(async () => {
+    const currentState = await loadRelayState();
+    const draft = cloneState(currentState);
+    await mutator(draft);
+    draft.updatedAt = new Date().toISOString();
+    return writeRelayState(draft);
+  });
 }
 
 async function getUserState(userKey, upstreamId = getDefaultUpstreamId()) {
