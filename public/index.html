@@ -263,6 +263,21 @@
                 </form>
               </section>
 
+              <section class="panel aggregate-panel">
+                <form id="aggregateForm" class="aggregate-form">
+                  <div class="panel-head compact-head">
+                    <h2>节点聚合</h2>
+                    <p>填 0 表示不参与，填 2 表示这个上游同时注册两份并合并返回。</p>
+                  </div>
+
+                  <div id="aggregateList" class="aggregate-list"></div>
+
+                  <div class="inline-actions">
+                    <button id="saveAggregateButton" class="primary-button slim-button" type="submit">保存聚合配置</button>
+                  </div>
+                </form>
+              </section>
+
               <div class="upstream-content-grid">
                 <section class="panel upstream-list-panel">
                   <div class="panel-head compact-head">

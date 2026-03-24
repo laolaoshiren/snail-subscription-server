@@ -14,6 +14,7 @@ const {
 const { getUpstreamModule } = require("./core/registry");
 
 const registrationQueues = new Map();
+const AGGREGATE_STORAGE_DELIMITER = "::";
 
 function enqueueRegistration(queueKey, job) {
   const currentQueue = registrationQueues.get(queueKey) || Promise.resolve();
@@ -22,8 +23,37 @@ function enqueueRegistration(queueKey, job) {
   return nextJob;
 }
 
-function resolveQueueKey(userKey, upstreamId) {
-  return `${userKey}:${upstreamId}`;
+function resolveQueueKey(userKey, storageKey) {
+  return `${userKey}:${storageKey}`;
+}
+
+function buildUpstreamStorageKey(upstreamId, instanceNumber = 1) {
+  const normalizedInstanceNumber = Number.parseInt(instanceNumber, 10);
+  if (!Number.isFinite(normalizedInstanceNumber) || normalizedInstanceNumber <= 1) {
+    return upstreamId;
+  }
+
+  return `${upstreamId}${AGGREGATE_STORAGE_DELIMITER}${normalizedInstanceNumber}`;
+}
+
+function buildHistoryDetails(options = {}, upstreamId, storageKey) {
+  const details = options.details && typeof options.details === "object" ? { ...options.details } : {};
+  const instanceNumber = Number.parseInt(options.instanceNumber, 10);
+
+  if (Number.isFinite(instanceNumber) && instanceNumber > 1) {
+    details.aggregate = true;
+    details.instanceNumber = instanceNumber;
+  }
+
+  if (storageKey && storageKey !== upstreamId) {
+    details.storageKey = storageKey;
+  }
+
+  if (options.instanceLabel) {
+    details.instanceLabel = options.instanceLabel;
+  }
+
+  return Object.keys(details).length > 0 ? details : null;
 }
 
 function normalizeInviteCode(inviteCode, upstreamConfig, record) {
@@ -93,22 +123,70 @@ function upstreamSupportsRelayType(upstreamId, relayType) {
   return supportedTypes.length === 0 || supportedTypes.includes(relayType);
 }
 
-async function getRuntimeCandidateUpstreamIds(relayType = "") {
-  const state = await loadSecurityState();
+function getEnabledOrderedUpstreamIds(state, relayType = "") {
   const orderedIds = Array.isArray(state.upstreamOrder)
     ? state.upstreamOrder.filter((upstreamId) => state.upstreams?.[upstreamId])
     : Object.keys(state.upstreams || {});
-  const enabledIds = orderedIds.filter((upstreamId) => state.upstreams?.[upstreamId]?.enabled !== false);
+
+  return orderedIds.filter((upstreamId) => {
+    if (state.upstreams?.[upstreamId]?.enabled === false) {
+      return false;
+    }
+
+    if (!relayType) {
+      return true;
+    }
+
+    return upstreamSupportsRelayType(upstreamId, relayType);
+  });
+}
+
+async function getRuntimeCandidateUpstreamIds(relayType = "") {
+  const state = await loadSecurityState();
+  const enabledIds = getEnabledOrderedUpstreamIds(state, relayType);
 
   if (state.activeUpstreamMode !== ACTIVE_UPSTREAM_MODES.POLLING) {
     return state.activeUpstreamId ? [state.activeUpstreamId] : enabledIds.slice(0, 1);
   }
 
-  const candidateIds = enabledIds.filter((upstreamId) => upstreamSupportsRelayType(upstreamId, relayType));
-  return candidateIds.length > 0 ? candidateIds : enabledIds;
+  return enabledIds;
+}
+
+async function getRuntimeAggregateTargets(relayType = "") {
+  const state = await loadSecurityState();
+  const enabledIds = getEnabledOrderedUpstreamIds(state, relayType);
+  const counts = state.upstreamAggregation?.counts && typeof state.upstreamAggregation.counts === "object"
+    ? state.upstreamAggregation.counts
+    : {};
+  const targets = [];
+
+  enabledIds.forEach((upstreamId) => {
+    const rawCopies = Number.parseInt(counts[upstreamId], 10);
+    const copies = Number.isFinite(rawCopies) && rawCopies > 0 ? rawCopies : 0;
+    if (copies <= 0) {
+      return;
+    }
+
+    const upstreamLabel =
+      state.upstreams?.[upstreamId]?.name ||
+      getUpstreamModule(upstreamId)?.manifest?.label ||
+      upstreamId;
+
+    for (let instanceNumber = 1; instanceNumber <= copies; instanceNumber += 1) {
+      targets.push({
+        upstreamId,
+        storageKey: buildUpstreamStorageKey(upstreamId, instanceNumber),
+        instanceNumber,
+        instanceLabel: copies > 1 ? `${upstreamLabel} #${instanceNumber}` : upstreamLabel,
+      });
+    }
+  });
+
+  return targets;
 }
 
 async function createRegistration(userKey, upstreamId, options = {}) {
+  const storageKey = options.storageKey || upstreamId;
   const upstreamConfig = await getUpstreamConfig(upstreamId);
   if (!upstreamConfig || upstreamConfig.enabled === false) {
     throw new Error("Current upstream is disabled.");
@@ -123,7 +201,7 @@ async function createRegistration(userKey, upstreamId, options = {}) {
     logger: console,
   });
 
-  await updateUserState(userKey, upstreamId, async (userState) => {
+  await updateUserState(userKey, storageKey, async (userState) => {
     userState.latestRegistration = result;
     userState.latestUsage = null;
     userState.history = [
@@ -135,9 +213,9 @@ async function createRegistration(userKey, upstreamId, options = {}) {
         decision: options.decision || "register",
         relayType: options.relayType || "",
         requestSource: options.requestSource || "",
-        upstreamId,
+        upstreamId: storageKey,
         registration: result,
-        details: options.details || null,
+        details: buildHistoryDetails(options, upstreamId, storageKey),
       },
       ...(Array.isArray(userState.history) ? userState.history : []),
     ];
@@ -147,10 +225,11 @@ async function createRegistration(userKey, upstreamId, options = {}) {
 }
 
 async function saveUsageSnapshot(userKey, upstreamId, record, usage, options = {}) {
+  const storageKey = options.storageKey || upstreamId;
   const mergedRecord = mergeRegistrationWithUsage(record, usage);
   const upstreamConfig = await getUpstreamConfig(upstreamId);
 
-  await updateUserState(userKey, upstreamId, async (userState) => {
+  await updateUserState(userKey, storageKey, async (userState) => {
     userState.latestRegistration = mergedRecord;
     userState.latestUsage = usage;
     userState.history = [
@@ -162,10 +241,10 @@ async function saveUsageSnapshot(userKey, upstreamId, record, usage, options = {
         decision: options.decision || "",
         relayType: options.relayType || "",
         requestSource: options.requestSource || "",
-        upstreamId,
+        upstreamId: storageKey,
         usage,
         registration: mergedRecord,
-        details: options.details || null,
+        details: buildHistoryDetails(options, upstreamId, storageKey),
       },
       ...(Array.isArray(userState.history) ? userState.history : []),
     ];
@@ -191,6 +270,7 @@ async function queryCurrentUsage(upstreamId, record) {
   if (module.manifest?.capabilities?.supportsStatusQuery === false) {
     return null;
   }
+
   return module.query({
     record,
     upstreamConfig,
@@ -249,13 +329,14 @@ function evaluateSmartDecision(upstreamConfig, record, usage) {
   };
 }
 
-async function resolveViewState(userKey, upstreamId) {
+async function resolveViewState(userKey, upstreamId, options = {}) {
+  const storageKey = options.storageKey || upstreamId;
   const upstreamConfig = await getUpstreamConfig(upstreamId);
   if (!upstreamConfig) {
     throw new Error("Current upstream does not exist.");
   }
 
-  const currentState = await getUserState(userKey, upstreamId);
+  const currentState = await getUserState(userKey, storageKey);
   if (upstreamConfig.runtimeMode !== RUNTIME_MODES.SMART_USAGE) {
     return {
       runtimeMode: upstreamConfig.runtimeMode,
@@ -265,11 +346,13 @@ async function resolveViewState(userKey, upstreamId) {
     };
   }
 
-  const queueKey = resolveQueueKey(userKey, upstreamId);
+  const queueKey = resolveQueueKey(userKey, storageKey);
   return enqueueRegistration(queueKey, async () => {
-    const initialState = await getUserState(userKey, upstreamId);
+    const initialState = await getUserState(userKey, storageKey);
     if (!initialState.latestRegistration) {
       await createRegistration(userKey, upstreamId, {
+        ...options,
+        storageKey,
         requestSource: "view",
         title: "管理页查看时自动初始化",
         message: "当前用户在此上游下还没有可用记录，已自动注册新的上游账号。",
@@ -278,7 +361,7 @@ async function resolveViewState(userKey, upstreamId) {
       return {
         runtimeMode: upstreamConfig.runtimeMode,
         upstreamConfig,
-        userState: await getUserState(userKey, upstreamId),
+        userState: await getUserState(userKey, storageKey),
         warning: "",
       };
     }
@@ -296,6 +379,8 @@ async function resolveViewState(userKey, upstreamId) {
 
       const decision = evaluateSmartDecision(upstreamConfig, initialState.latestRegistration, usage);
       await saveUsageSnapshot(userKey, upstreamId, initialState.latestRegistration, usage, {
+        ...options,
+        storageKey,
         requestSource: "view",
         title: "管理页已刷新上游状态",
         message: decision.message,
@@ -305,6 +390,8 @@ async function resolveViewState(userKey, upstreamId) {
 
       if (decision.shouldRegister) {
         await createRegistration(userKey, upstreamId, {
+          ...options,
+          storageKey,
           requestSource: "view",
           title: decision.title,
           message: `${decision.message} 服务端已创建新的上游账号。`,
@@ -317,41 +404,45 @@ async function resolveViewState(userKey, upstreamId) {
       return {
         runtimeMode: upstreamConfig.runtimeMode,
         upstreamConfig,
-        userState: await getUserState(userKey, upstreamId),
+        userState: await getUserState(userKey, storageKey),
         warning: "",
       };
     } catch (error) {
-      await appendUserHistory(userKey, upstreamId, {
+      await appendUserHistory(userKey, storageKey, {
         action: "usage_check_failed",
         title: "管理页查询上游失败",
         message: error.message,
         mode: upstreamConfig.runtimeMode,
         requestSource: "view",
         registration: initialState.latestRegistration,
+        details: buildHistoryDetails(options, upstreamId, storageKey),
       });
 
       return {
         runtimeMode: upstreamConfig.runtimeMode,
         upstreamConfig,
-        userState: await getUserState(userKey, upstreamId),
+        userState: await getUserState(userKey, storageKey),
         warning: `上游查询失败，已返回本地缓存：${error.message}`,
       };
     }
   });
 }
 
-async function resolveRelayState(userKey, upstreamId, relayType) {
+async function resolveRelayState(userKey, upstreamId, relayType, options = {}) {
+  const storageKey = options.storageKey || upstreamId;
   const upstreamConfig = await getUpstreamConfig(upstreamId);
   if (!upstreamConfig) {
     throw new Error("Current upstream does not exist.");
   }
 
-  const queueKey = resolveQueueKey(userKey, upstreamId);
+  const queueKey = resolveQueueKey(userKey, storageKey);
   return enqueueRegistration(queueKey, async () => {
-    const initialState = await getUserState(userKey, upstreamId);
+    const initialState = await getUserState(userKey, storageKey);
 
     if (upstreamConfig.runtimeMode === RUNTIME_MODES.ALWAYS_REFRESH) {
       await createRegistration(userKey, upstreamId, {
+        ...options,
+        storageKey,
         requestSource: "relay",
         relayType,
         title: "兼容模式已重新注册",
@@ -361,12 +452,14 @@ async function resolveRelayState(userKey, upstreamId, relayType) {
       return {
         runtimeMode: upstreamConfig.runtimeMode,
         upstreamConfig,
-        userState: await getUserState(userKey, upstreamId),
+        userState: await getUserState(userKey, storageKey),
       };
     }
 
     if (!initialState.latestRegistration) {
       await createRegistration(userKey, upstreamId, {
+        ...options,
+        storageKey,
         requestSource: "relay",
         relayType,
         title: "首次拉取时自动初始化",
@@ -376,7 +469,7 @@ async function resolveRelayState(userKey, upstreamId, relayType) {
       return {
         runtimeMode: upstreamConfig.runtimeMode,
         upstreamConfig,
-        userState: await getUserState(userKey, upstreamId),
+        userState: await getUserState(userKey, storageKey),
       };
     }
 
@@ -384,6 +477,8 @@ async function resolveRelayState(userKey, upstreamId, relayType) {
       const usage = await queryCurrentUsage(upstreamId, initialState.latestRegistration);
       if (!usage) {
         await createRegistration(userKey, upstreamId, {
+          ...options,
+          storageKey,
           requestSource: "relay",
           relayType,
           title: "查询结果为空，已重新注册",
@@ -394,12 +489,14 @@ async function resolveRelayState(userKey, upstreamId, relayType) {
         return {
           runtimeMode: upstreamConfig.runtimeMode,
           upstreamConfig,
-          userState: await getUserState(userKey, upstreamId),
+          userState: await getUserState(userKey, storageKey),
         };
       }
 
       const decision = evaluateSmartDecision(upstreamConfig, initialState.latestRegistration, usage);
       await saveUsageSnapshot(userKey, upstreamId, initialState.latestRegistration, usage, {
+        ...options,
+        storageKey,
         requestSource: "relay",
         relayType,
         title: "客户端拉取前已查询上游状态",
@@ -410,6 +507,8 @@ async function resolveRelayState(userKey, upstreamId, relayType) {
 
       if (decision.shouldRegister) {
         await createRegistration(userKey, upstreamId, {
+          ...options,
+          storageKey,
           requestSource: "relay",
           relayType,
           title: decision.title,
@@ -419,7 +518,7 @@ async function resolveRelayState(userKey, upstreamId, relayType) {
           record: initialState.latestRegistration,
         });
       } else {
-        await appendUserHistory(userKey, upstreamId, {
+        await appendUserHistory(userKey, storageKey, {
           action: "reuse_registration",
           title: "继续复用当前上游账号",
           message: decision.message,
@@ -429,17 +528,24 @@ async function resolveRelayState(userKey, upstreamId, relayType) {
           requestSource: "relay",
           usage,
           registration: mergeRegistrationWithUsage(initialState.latestRegistration, usage),
-          details: decision.details,
+          details: buildHistoryDetails(
+            {
+              ...options,
+              details: decision.details,
+            },
+            upstreamId,
+            storageKey,
+          ),
         });
       }
 
       return {
         runtimeMode: upstreamConfig.runtimeMode,
         upstreamConfig,
-        userState: await getUserState(userKey, upstreamId),
+        userState: await getUserState(userKey, storageKey),
       };
     } catch (error) {
-      await appendUserHistory(userKey, upstreamId, {
+      await appendUserHistory(userKey, storageKey, {
         action: "usage_check_failed",
         title: "客户端拉取前查询上游失败",
         message: error.message,
@@ -447,9 +553,12 @@ async function resolveRelayState(userKey, upstreamId, relayType) {
         relayType,
         requestSource: "relay",
         registration: initialState.latestRegistration,
+        details: buildHistoryDetails(options, upstreamId, storageKey),
       });
 
       await createRegistration(userKey, upstreamId, {
+        ...options,
+        storageKey,
         requestSource: "relay",
         relayType,
         title: "查询失败，已重新注册",
@@ -460,14 +569,15 @@ async function resolveRelayState(userKey, upstreamId, relayType) {
       return {
         runtimeMode: upstreamConfig.runtimeMode,
         upstreamConfig,
-        userState: await getUserState(userKey, upstreamId),
+        userState: await getUserState(userKey, storageKey),
       };
     }
   });
 }
 
 async function manualRegister(userKey, upstreamId, options = {}) {
-  const queueKey = resolveQueueKey(userKey, upstreamId);
+  const storageKey = options.storageKey || upstreamId;
+  const queueKey = resolveQueueKey(userKey, storageKey);
   const upstreamConfig = await getUpstreamConfig(upstreamId);
   if (!upstreamConfig) {
     throw new Error("Current upstream does not exist.");
@@ -475,6 +585,8 @@ async function manualRegister(userKey, upstreamId, options = {}) {
 
   return enqueueRegistration(queueKey, async () => {
     await createRegistration(userKey, upstreamId, {
+      ...options,
+      storageKey,
       inviteCode: options.inviteCode,
       requestSource: "manual",
       relayType: options.relayType || "",
@@ -486,7 +598,7 @@ async function manualRegister(userKey, upstreamId, options = {}) {
     return {
       runtimeMode: upstreamConfig.runtimeMode,
       upstreamConfig,
-      userState: await getUserState(userKey, upstreamId),
+      userState: await getUserState(userKey, storageKey),
     };
   });
 }
@@ -510,7 +622,7 @@ async function manualRegisterWithRuntime(userKey, options = {}) {
       if (candidateIds.length > 1) {
         await appendUserHistory(userKey, upstreamId, {
           action: "polling_skip",
-          title: "杞涓婃父璺宠繃澶辫触鍊欓€夐」",
+          title: "轮询模式跳过失败候选项",
           message: error.message,
           requestSource: "manual",
           relayType: requestedRelayType,
@@ -525,11 +637,109 @@ async function manualRegisterWithRuntime(userKey, options = {}) {
   throw lastError || new Error("No available upstream.");
 }
 
+async function resolveAggregateViewStates(userKey, relayType = "") {
+  const targets = await getRuntimeAggregateTargets(relayType);
+  const results = [];
+  const failures = [];
+
+  for (const target of targets) {
+    try {
+      const result = await resolveViewState(userKey, target.upstreamId, target);
+      results.push({
+        ...target,
+        ...result,
+      });
+    } catch (error) {
+      failures.push({
+        ...target,
+        error,
+      });
+    }
+  }
+
+  return {
+    targets: results,
+    failures,
+  };
+}
+
+async function resolveAggregateRelayStates(userKey, relayType = "") {
+  const targets = await getRuntimeAggregateTargets(relayType);
+  const results = [];
+  const failures = [];
+
+  for (const target of targets) {
+    try {
+      const result = await resolveRelayState(userKey, target.upstreamId, relayType, target);
+      results.push({
+        ...target,
+        ...result,
+      });
+    } catch (error) {
+      failures.push({
+        ...target,
+        error,
+      });
+    }
+  }
+
+  return {
+    targets: results,
+    failures,
+  };
+}
+
+async function manualRegisterAggregateWithRuntime(userKey, options = {}) {
+  const targets = await getRuntimeAggregateTargets(options.relayType || "");
+  const results = [];
+  const failures = [];
+
+  for (const target of targets) {
+    try {
+      const result = await manualRegister(userKey, target.upstreamId, {
+        ...options,
+        ...target,
+      });
+      results.push({
+        ...target,
+        ...result,
+      });
+    } catch (error) {
+      failures.push({
+        ...target,
+        error,
+      });
+      await appendUserHistory(userKey, target.storageKey, {
+        action: "aggregate_skip",
+        title: "聚合模式跳过失败实例",
+        message: error.message,
+        requestSource: "manual",
+        relayType: options.relayType || "",
+        details: buildHistoryDetails(target, target.upstreamId, target.storageKey),
+      });
+    }
+  }
+
+  if (results.length === 0) {
+    throw failures[0]?.error || new Error("No aggregate upstream succeeded.");
+  }
+
+  return {
+    targets: results,
+    failures,
+  };
+}
+
 module.exports = {
+  buildUpstreamStorageKey,
+  getRuntimeAggregateTargets,
   getRuntimeCandidateUpstreamIds,
   manualRegister,
+  manualRegisterAggregateWithRuntime,
   manualRegisterWithRuntime,
   mergeRegistrationWithUsage,
+  resolveAggregateRelayStates,
+  resolveAggregateViewStates,
   resolveRelayState,
   resolveViewState,
   upstreamSupportsRelayType,

@@ -32,7 +32,9 @@ const RUNTIME_MODES = Object.freeze({
 const ACTIVE_UPSTREAM_MODES = Object.freeze({
   SINGLE: "single",
   POLLING: "polling",
+  AGGREGATE: "aggregate",
 });
+const MAX_AGGREGATE_COPIES = 10;
 const DEFAULT_UPSTREAM_CLOUD = Object.freeze({
   enabled: true,
   autoSync: true,
@@ -40,6 +42,9 @@ const DEFAULT_UPSTREAM_CLOUD = Object.freeze({
   repoName: "snail-subscription-server",
   branch: "main",
   directory: "src/upstreams/vendors",
+});
+const DEFAULT_UPSTREAM_AGGREGATION = Object.freeze({
+  counts: {},
 });
 
 function hashPassword(password, salt) {
@@ -135,6 +140,15 @@ function normalizeUpstreamCloudSettings(input = {}) {
   };
 }
 
+function normalizeAggregateCopyCount(value) {
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    return 0;
+  }
+
+  return Math.min(MAX_AGGREGATE_COPIES, parsed);
+}
+
 function normalizeUpstreamConfigs(rawUpstreams, legacyRuntimeMode) {
   const source = rawUpstreams && typeof rawUpstreams === "object" ? rawUpstreams : {};
   const result = {};
@@ -164,9 +178,14 @@ function getUpstreamSortLabel(upstreamId, upstreams) {
 }
 
 function normalizeActiveUpstreamMode(input) {
-  return (input || "").toString().trim() === ACTIVE_UPSTREAM_MODES.POLLING
-    ? ACTIVE_UPSTREAM_MODES.POLLING
-    : ACTIVE_UPSTREAM_MODES.SINGLE;
+  const value = (input || "").toString().trim();
+  if (value === ACTIVE_UPSTREAM_MODES.POLLING) {
+    return ACTIVE_UPSTREAM_MODES.POLLING;
+  }
+  if (value === ACTIVE_UPSTREAM_MODES.AGGREGATE) {
+    return ACTIVE_UPSTREAM_MODES.AGGREGATE;
+  }
+  return ACTIVE_UPSTREAM_MODES.SINGLE;
 }
 
 function normalizeUpstreamOrder(rawOrder, upstreams) {
@@ -215,23 +234,61 @@ function resolveActiveUpstreamId(input, upstreams, upstreamOrder = []) {
   return getDefaultUpstreamId();
 }
 
+function normalizeUpstreamAggregation(input = {}, upstreams = {}, upstreamOrder = [], fallbackUpstreamId = "") {
+  const source = input && typeof input === "object" ? input : {};
+  const sourceCounts = source.counts && typeof source.counts === "object" ? source.counts : {};
+  const orderedIds = normalizeUpstreamOrder(upstreamOrder, upstreams);
+  const counts = {};
+
+  orderedIds.forEach((upstreamId) => {
+    counts[upstreamId] = normalizeAggregateCopyCount(sourceCounts[upstreamId]);
+  });
+
+  if (Object.values(counts).some((value) => value > 0)) {
+    return { counts };
+  }
+
+  const fallbackId = resolveActiveUpstreamId(fallbackUpstreamId, upstreams, upstreamOrder);
+  const seedId =
+    (fallbackId && upstreams[fallbackId]?.enabled !== false && fallbackId) ||
+    orderedIds.find((upstreamId) => upstreams[upstreamId]?.enabled !== false) ||
+    orderedIds[0] ||
+    "";
+
+  if (seedId) {
+    counts[seedId] = 1;
+  }
+
+  return {
+    counts,
+  };
+}
+
 function createSecurityState(password, options = {}) {
   const salt = crypto.randomBytes(16).toString("hex");
   const upstreams = normalizeUpstreamConfigs(options.upstreams, options.runtimeMode);
   const upstreamOrder = normalizeUpstreamOrder(options.upstreamOrder, upstreams);
   const activeUpstreamMode = normalizeActiveUpstreamMode(options.activeUpstreamMode);
   const upstreamCloud = normalizeUpstreamCloudSettings(options.upstreamCloud);
+  const activeUpstreamId = resolveActiveUpstreamId(options.activeUpstreamId, upstreams, upstreamOrder);
+  const upstreamAggregation = normalizeUpstreamAggregation(
+    options.upstreamAggregation,
+    upstreams,
+    upstreamOrder,
+    activeUpstreamId,
+  );
 
   return {
     passwordSalt: salt,
     passwordHash: hashPassword(password, salt),
     relayTokens: normalizeRelayTokens(options.relayTokens, options.legacyRelayToken),
     displayOrigin: normalizeDisplayOrigin(options.displayOrigin),
-    activeUpstreamId: resolveActiveUpstreamId(options.activeUpstreamId, upstreams, upstreamOrder),
+    activeUpstreamId,
     activeUpstreamMode,
     upstreamOrder,
     upstreams,
     upstreamCloud,
+    upstreamAggregation,
     updatedAt: new Date().toISOString(),
   };
 }
@@ -245,17 +302,25 @@ function normalizePanelState(rawState = {}) {
   const upstreamOrder = normalizeUpstreamOrder(rawState.upstreamOrder, upstreams);
   const activeUpstreamMode = normalizeActiveUpstreamMode(rawState.activeUpstreamMode);
   const upstreamCloud = normalizeUpstreamCloudSettings(rawState.upstreamCloud);
+  const activeUpstreamId = resolveActiveUpstreamId(rawState.activeUpstreamId, upstreams, upstreamOrder);
+  const upstreamAggregation = normalizeUpstreamAggregation(
+    rawState.upstreamAggregation,
+    upstreams,
+    upstreamOrder,
+    activeUpstreamId,
+  );
 
   return {
     passwordSalt: rawState.passwordSalt,
     passwordHash: rawState.passwordHash,
     relayTokens: normalizeRelayTokens(rawState.relayTokens, rawState.relayToken),
     displayOrigin: normalizeDisplayOrigin(rawState.displayOrigin),
-    activeUpstreamId: resolveActiveUpstreamId(rawState.activeUpstreamId, upstreams, upstreamOrder),
+    activeUpstreamId,
     activeUpstreamMode,
     upstreamOrder,
     upstreams,
     upstreamCloud,
+    upstreamAggregation,
     updatedAt: rawState.updatedAt || new Date().toISOString(),
   };
 }
@@ -387,6 +452,7 @@ async function updatePassword({ currentPassword, newPassword }) {
     upstreamOrder: state.upstreamOrder,
     upstreams: state.upstreams,
     upstreamCloud: state.upstreamCloud,
+    upstreamAggregation: state.upstreamAggregation,
   });
   await saveSecurityState(nextState);
   return {
@@ -434,6 +500,7 @@ async function getActiveUpstreamRuntime() {
     activeUpstreamId: state.activeUpstreamId,
     activeUpstreamMode: state.activeUpstreamMode,
     upstreamOrder: Array.isArray(state.upstreamOrder) ? [...state.upstreamOrder] : [],
+    upstreamAggregation: state.upstreamAggregation || DEFAULT_UPSTREAM_AGGREGATION,
   };
 }
 
@@ -476,6 +543,7 @@ async function listUpstreamConfigs() {
         settingFields: Array.isArray(module.manifest.settingFields) ? module.manifest.settingFields : [],
         sourceType: module.__source?.type || "bundled",
         config: state.upstreams[module.manifest.id],
+        aggregateCopies: state.upstreamAggregation?.counts?.[module.manifest.id] || 0,
         orderIndex: index,
         active:
           state.activeUpstreamMode === ACTIVE_UPSTREAM_MODES.SINGLE &&
@@ -527,6 +595,22 @@ async function updatePanelSettings(settings = {}) {
     });
   }
 
+  if (settings.upstreamAggregation !== undefined) {
+    nextState.upstreamAggregation = normalizeUpstreamAggregation(
+      {
+        ...nextState.upstreamAggregation,
+        ...settings.upstreamAggregation,
+        counts:
+          settings.upstreamAggregation && Object.prototype.hasOwnProperty.call(settings.upstreamAggregation, "counts")
+            ? settings.upstreamAggregation.counts
+            : nextState.upstreamAggregation?.counts,
+      },
+      nextState.upstreams,
+      nextState.upstreamOrder,
+      nextState.activeUpstreamId,
+    );
+  }
+
   const targetUpstreamId = settings.upstreamId || nextState.activeUpstreamId;
   if (targetUpstreamId) {
     const module = getUpstreamModule(targetUpstreamId);
@@ -554,6 +638,12 @@ async function updatePanelSettings(settings = {}) {
     nextState.upstreams,
     nextState.upstreamOrder,
   );
+  nextState.upstreamAggregation = normalizeUpstreamAggregation(
+    nextState.upstreamAggregation,
+    nextState.upstreams,
+    nextState.upstreamOrder,
+    nextState.activeUpstreamId,
+  );
   nextState.updatedAt = new Date().toISOString();
 
   await saveSecurityState(nextState);
@@ -563,6 +653,7 @@ async function updatePanelSettings(settings = {}) {
     displayOrigin: nextState.displayOrigin,
     upstreamOrder: nextState.upstreamOrder,
     upstreamCloud: nextState.upstreamCloud,
+    upstreamAggregation: nextState.upstreamAggregation,
     updatedAt: nextState.updatedAt,
     upstreamConfig: nextState.upstreams[nextState.activeUpstreamId],
   };
@@ -572,6 +663,7 @@ module.exports = {
   ACTIVE_UPSTREAM_MODES,
   DEFAULT_PASSWORD,
   DEFAULT_USER_KEY,
+  MAX_AGGREGATE_COPIES,
   RELAY_USERS,
   RUNTIME_MODES,
   USER_KEYS,

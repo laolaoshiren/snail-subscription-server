@@ -19,6 +19,9 @@ const upstreamCloudForm = document.querySelector("#upstreamCloudForm");
 const checkUpstreamCloudButton = document.querySelector("#checkUpstreamCloudButton");
 const syncUpstreamCloudButton = document.querySelector("#syncUpstreamCloudButton");
 const saveUpstreamCloudButton = document.querySelector("#saveUpstreamCloudButton");
+const aggregateForm = document.querySelector("#aggregateForm");
+const aggregateList = document.querySelector("#aggregateList");
+const saveAggregateButton = document.querySelector("#saveAggregateButton");
 
 const statusBar = document.querySelector("#statusBar");
 const linksList = document.querySelector("#linksList");
@@ -93,9 +96,11 @@ const saveUpstreamButton = document.querySelector("#saveUpstreamButton");
 const saveSystemButton = document.querySelector("#saveSystemButton");
 const savePasswordButton = document.querySelector("#savePasswordButton");
 const POLLING_UPSTREAM_VALUE = "__polling__";
+const AGGREGATE_UPSTREAM_VALUE = "__aggregate__";
 const ACTIVE_UPSTREAM_MODES = {
   SINGLE: "single",
   POLLING: "polling",
+  AGGREGATE: "aggregate",
 };
 
 const protocolLabels = {
@@ -117,6 +122,9 @@ const state = {
   currentUserKey: "userA",
   activeUpstreamId: "",
   activeUpstreamMode: ACTIVE_UPSTREAM_MODES.SINGLE,
+  upstreamAggregation: {
+    counts: {},
+  },
   selectedUpstreamId: "",
   currentTab: "subscription",
   appUpdate: null,
@@ -473,7 +481,39 @@ function isPollingMode() {
   return state.activeUpstreamMode === ACTIVE_UPSTREAM_MODES.POLLING;
 }
 
+function isAggregateMode() {
+  return state.activeUpstreamMode === ACTIVE_UPSTREAM_MODES.AGGREGATE;
+}
+
+function getAggregateCopies(upstreamId) {
+  const parsed = Number.parseInt(state.upstreamAggregation?.counts?.[upstreamId], 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
+}
+
+function getAggregateSelectionLabel() {
+  const labels = [];
+
+  getOrderedUpstreams().forEach((upstream) => {
+    if (upstream.config?.enabled === false) {
+      return;
+    }
+
+    const copies = getAggregateCopies(upstream.id);
+    if (copies <= 0) {
+      return;
+    }
+
+    labels.push(copies > 1 ? `${upstream.label} x${copies}` : upstream.label);
+  });
+
+  return labels.join(" + ");
+}
+
 function getRuntimeSelectionLabel(upstream = getActiveUpstream()) {
+  if (isAggregateMode()) {
+    return "聚合模式";
+  }
+
   return isPollingMode() ? "轮询模式" : upstream?.label || "主上游";
 }
 
@@ -578,6 +618,13 @@ function describeMode(upstream) {
 }
 
 function describeRuntimeSelection(upstream = getActiveUpstream()) {
+  if (isAggregateMode()) {
+    const selectionLabel = getAggregateSelectionLabel();
+    return selectionLabel
+      ? `聚合模式：${selectionLabel}。`
+      : "聚合模式：暂无可用聚合上游。";
+  }
+
   if (!isPollingMode()) {
     return describeMode(upstream);
   }
@@ -607,6 +654,7 @@ async function persistUpstreamOrder(nextOrder) {
   state.upstreamOrder = [...nextOrder];
   renderUpstreamSwitcher();
   renderUpstreamList();
+  renderAggregateEditor();
 
   try {
     await requestJson("/api/settings", {
@@ -619,6 +667,7 @@ async function persistUpstreamOrder(nextOrder) {
     state.upstreamOrder = previousOrder;
     renderUpstreamSwitcher();
     renderUpstreamList();
+    renderAggregateEditor();
     syncUpstreamForm();
     setStatus(error.message, "error");
   }
@@ -699,6 +748,36 @@ function renderUpstreamList() {
   });
 }
 
+function renderAggregateEditor() {
+  if (!aggregateList) {
+    return;
+  }
+
+  aggregateList.innerHTML = "";
+
+  getOrderedUpstreams().forEach((upstream) => {
+    const row = document.createElement("label");
+    row.className = "aggregate-item";
+    row.innerHTML = `
+      <span class="aggregate-item__copy">
+        <strong>${upstream.label || upstream.id}</strong>
+        <small>${upstream.config?.enabled === false ? "已停用" : "按排序参与聚合"}</small>
+      </span>
+      <input
+        class="aggregate-item__input"
+        type="number"
+        min="0"
+        max="10"
+        step="1"
+        value="${getAggregateCopies(upstream.id)}"
+        data-aggregate-upstream-id="${upstream.id}"
+        ${upstream.config?.enabled === false ? "disabled" : ""}
+      />
+    `;
+    aggregateList.appendChild(row);
+  });
+}
+
 function fillMeta(registration) {
   setText(metaEmail, registration?.email || "暂无");
   setText(metaPassword, registration?.password || "暂无");
@@ -710,6 +789,27 @@ function fillMeta(registration) {
   );
   setText(metaExpiredAt, registration?.expiredAt ? formatDateTime(registration.expiredAt) : "暂无");
   setText(metaUpstreamSite, registration?.upstreamSite || registration?.entryUrl || "暂无");
+}
+
+function syncRegisterForm() {
+  if (!registerInviteCodeInput || !registerButton) {
+    return;
+  }
+
+  if (isAggregateMode()) {
+    registerInviteCodeInput.disabled = true;
+    registerInviteCodeInput.placeholder = "聚合模式使用各上游默认邀请码";
+    registerInviteCodeInput.value = "";
+    registerButton.textContent = "立即重新注册聚合上游";
+    return;
+  }
+
+  const supportsInviteCode = upstreamSupportsInviteCode(getActiveUpstream());
+  registerInviteCodeInput.disabled = !supportsInviteCode;
+  registerInviteCodeInput.placeholder = supportsInviteCode
+    ? "可选，默认用当前上游邀请码"
+    : "当前上游不支持邀请码";
+  registerButton.textContent = "立即重新注册当前上游";
 }
 
 function renderLinks(relayUrls, upstream = getActiveUpstream()) {
@@ -1288,7 +1388,11 @@ async function switchActiveUpstream(upstreamId) {
 
   try {
     const nextSettings =
-      upstreamId === POLLING_UPSTREAM_VALUE
+      upstreamId === AGGREGATE_UPSTREAM_VALUE
+        ? {
+            activeUpstreamMode: ACTIVE_UPSTREAM_MODES.AGGREGATE,
+          }
+        : upstreamId === POLLING_UPSTREAM_VALUE
         ? {
             activeUpstreamMode: ACTIVE_UPSTREAM_MODES.POLLING,
           }
@@ -1303,7 +1407,9 @@ async function switchActiveUpstream(upstreamId) {
 
     await refreshSession();
     setStatus(
-      isPollingMode()
+      isAggregateMode()
+        ? `已切换到聚合模式。当前配置：${getAggregateSelectionLabel() || "未选择上游"}。`
+        : isPollingMode()
         ? "已切换到轮询模式。下游请求会按排序顺序自动尝试上游。"
         : `已切换到 ${getActiveUpstream().label}。`,
       "success",
@@ -1326,6 +1432,11 @@ function renderUpstreamSwitcher() {
 
   upstreamSwitcher.innerHTML = "";
 
+  const aggregateOption = document.createElement("option");
+  aggregateOption.value = AGGREGATE_UPSTREAM_VALUE;
+  aggregateOption.textContent = "聚合模式 · 合并多个上游节点";
+  upstreamSwitcher.appendChild(aggregateOption);
+
   const pollingOption = document.createElement("option");
   pollingOption.value = POLLING_UPSTREAM_VALUE;
   pollingOption.textContent = "轮询模式 · 按排序顺序依次尝试";
@@ -1341,9 +1452,11 @@ function renderUpstreamSwitcher() {
     upstreamSwitcher.appendChild(option);
   });
 
-  upstreamSwitcher.value = isPollingMode()
-    ? POLLING_UPSTREAM_VALUE
-    : state.activeUpstreamId || getOrderedUpstreams()[0]?.id || "";
+  upstreamSwitcher.value = isAggregateMode()
+    ? AGGREGATE_UPSTREAM_VALUE
+    : isPollingMode()
+      ? POLLING_UPSTREAM_VALUE
+      : state.activeUpstreamId || getOrderedUpstreams()[0]?.id || "";
 }
 
 function applySession(payload) {
@@ -1353,6 +1466,10 @@ function applySession(payload) {
   state.users = Array.isArray(payload.users) ? payload.users : [];
   state.upstreams = Array.isArray(payload.upstreams) ? payload.upstreams : [];
   state.upstreamOrder = Array.isArray(payload.upstreamOrder) ? payload.upstreamOrder : [];
+  state.upstreamAggregation =
+    payload.upstreamAggregation && typeof payload.upstreamAggregation === "object"
+      ? payload.upstreamAggregation
+      : { counts: {} };
   state.relayUrlsByUser = payload.relayUrlsByUser || {};
   state.userSummaries = Array.isArray(payload.userSummaries) ? payload.userSummaries : [];
   state.activeUpstreamId = payload.activeUpstreamId || state.upstreams[0]?.id || "";
@@ -1370,8 +1487,10 @@ function applySession(payload) {
   setText(activeUserLabel, getCurrentUser().label);
   renderUpstreamSwitcher();
   renderUpstreamList();
+  renderAggregateEditor();
   renderUserSwitcher();
   syncUpstreamForm();
+  syncRegisterForm();
   syncSystemForm();
   renderAppUpdateStatus();
   syncUpstreamCloudForm();
@@ -1399,10 +1518,14 @@ function applyUserPayload(payload) {
 async function loadUserState() {
   setText(activeUserLabel, getCurrentUser().label);
   setText(activeUpstreamLabel, getRuntimeSelectionLabel(getActiveUpstream()));
+  syncRegisterForm();
 
   try {
+    const latestQuery = isAggregateMode()
+      ? `/api/subscriptions/latest?type=full&user=${encodeURIComponent(state.currentUserKey)}`
+      : `/api/subscriptions/latest?type=full&user=${encodeURIComponent(state.currentUserKey)}&upstreamId=${encodeURIComponent(state.activeUpstreamId)}`;
     const payload = await requestJson(
-      `/api/subscriptions/latest?type=full&user=${encodeURIComponent(state.currentUserKey)}&upstreamId=${encodeURIComponent(state.activeUpstreamId)}`,
+      latestQuery,
     );
 
     applyUserPayload(payload);
@@ -1556,7 +1679,7 @@ if (registerForm) {
     setLoading(registerButton, "处理中...", true);
 
     const formData = new FormData(registerForm);
-    const inviteCode = upstreamSupportsInviteCode(getActiveUpstream())
+    const inviteCode = !isAggregateMode() && upstreamSupportsInviteCode(getActiveUpstream())
       ? (formData.get("inviteCode") || "").toString().trim()
       : "";
 
@@ -1572,7 +1695,9 @@ if (registerForm) {
 
       applyUserPayload(payload);
       setStatus(
-        isPollingMode()
+        isAggregateMode()
+          ? `当前用户已完成聚合注册：${payload.aggregate?.label || "聚合模式"}。`
+          : isPollingMode()
           ? `当前用户已按轮询模式完成注册，命中 ${payload.upstream?.label || "可用上游"}。`
           : `当前用户已在 ${getActiveUpstream().label} 下完成重新注册。`,
         "success",
@@ -1715,6 +1840,45 @@ if (upstreamCloudForm) {
       setStatus(error.message, "error");
     } finally {
       setLoading(saveUpstreamCloudButton, "保存中...", false);
+    }
+  });
+}
+
+if (aggregateForm) {
+  aggregateForm.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    clearStatus();
+    setLoading(saveAggregateButton, "保存中...", true);
+
+    const counts = {};
+    Array.from(aggregateList?.querySelectorAll("[data-aggregate-upstream-id]") || []).forEach((input) => {
+      const upstreamId = input.dataset.aggregateUpstreamId || "";
+      const parsed = Number.parseInt(input.value || "0", 10);
+      counts[upstreamId] = Number.isFinite(parsed) && parsed > 0 ? Math.min(parsed, 10) : 0;
+    });
+
+    try {
+      await requestJson("/api/settings", {
+        method: "POST",
+        body: JSON.stringify({
+          upstreamAggregation: {
+            counts,
+          },
+        }),
+      });
+
+      await refreshSession();
+      setStatus(`聚合配置已保存：${getAggregateSelectionLabel() || "未选择上游"}。`, "success");
+    } catch (error) {
+      if (error.status === 401) {
+        showLogin();
+        setStatus("登录状态已失效，请重新输入密码。", "error");
+        return;
+      }
+
+      setStatus(error.message, "error");
+    } finally {
+      setLoading(saveAggregateButton, "保存中...", false);
     }
   });
 }
@@ -1927,7 +2091,11 @@ tabButtons.forEach((button) => {
 if (upstreamSwitcher) {
   upstreamSwitcher.addEventListener("change", async (event) => {
     const nextUpstreamId = event.target.value;
-    const currentValue = isPollingMode() ? POLLING_UPSTREAM_VALUE : state.activeUpstreamId;
+    const currentValue = isAggregateMode()
+      ? AGGREGATE_UPSTREAM_VALUE
+      : isPollingMode()
+        ? POLLING_UPSTREAM_VALUE
+        : state.activeUpstreamId;
     if (!nextUpstreamId || nextUpstreamId === currentValue) {
       return;
     }

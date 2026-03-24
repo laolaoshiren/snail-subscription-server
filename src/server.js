@@ -14,7 +14,6 @@ const {
   DEFAULT_USER_KEY,
   RELAY_USERS,
   RUNTIME_MODES,
-  getActiveUpstreamId,
   getActiveUpstreamRuntime,
   getDisplayOrigin,
   getRelayToken,
@@ -44,10 +43,14 @@ const {
   loadRelayState,
 } = require("./registrationStore");
 const { listUpstreamModuleDiagnostics, reloadUpstreamModules } = require("./upstreams/core/registry");
+const { mergeSubscriptionBodies } = require("./subscriptionMerger");
 const { URL_TYPES } = require("./upstreams/shared/snailApi");
 const {
   getRuntimeCandidateUpstreamIds,
+  manualRegisterAggregateWithRuntime,
   manualRegisterWithRuntime,
+  resolveAggregateRelayStates,
+  resolveAggregateViewStates,
   resolveRelayState,
   resolveViewState,
 } = require("./upstreams/service");
@@ -763,6 +766,402 @@ function getUpstreamSummary(upstreams, upstreamId) {
   return upstreams.find((item) => item.id === upstreamId) || upstreams[0] || null;
 }
 
+function formatAggregateSelectionLabel(targets = []) {
+  const counts = new Map();
+  const labels = new Map();
+
+  targets.forEach((target) => {
+    if (!target?.upstreamId) {
+      return;
+    }
+
+    counts.set(target.upstreamId, (counts.get(target.upstreamId) || 0) + 1);
+    labels.set(target.upstreamId, target.instanceLabel || target.upstreamId);
+  });
+
+  return Array.from(counts.entries())
+    .map(([upstreamId, copies]) => {
+      const baseLabel = labels.get(upstreamId) || upstreamId;
+      const normalizedLabel = baseLabel.replace(/\s+#\d+$/, "");
+      return copies > 1 ? `${normalizedLabel} x${copies}` : normalizedLabel;
+    })
+    .join(" + ");
+}
+
+function parseSubscriptionUserInfo(headerValue = "") {
+  const result = {};
+
+  headerValue
+    .split(";")
+    .map((part) => part.trim())
+    .filter(Boolean)
+    .forEach((part) => {
+      const separatorIndex = part.indexOf("=");
+      if (separatorIndex < 0) {
+        return;
+      }
+
+      const key = part.slice(0, separatorIndex).trim();
+      const rawValue = part.slice(separatorIndex + 1).trim();
+      const parsedValue = Number.parseInt(rawValue, 10);
+      if (key && Number.isFinite(parsedValue)) {
+        result[key] = parsedValue;
+      }
+    });
+
+  return result;
+}
+
+function mergeSubscriptionUserInfoHeaders(headerValues = []) {
+  const parsedValues = headerValues
+    .map((value) => parseSubscriptionUserInfo(value))
+    .filter((value) => Object.keys(value).length > 0);
+
+  if (parsedValues.length === 0) {
+    return "";
+  }
+
+  const merged = {
+    upload: 0,
+    download: 0,
+    total: 0,
+    expire: 0,
+  };
+
+  parsedValues.forEach((entry) => {
+    merged.upload += entry.upload || 0;
+    merged.download += entry.download || 0;
+    merged.total += entry.total || 0;
+    if (entry.expire > 0 && (merged.expire === 0 || entry.expire < merged.expire)) {
+      merged.expire = entry.expire;
+    }
+  });
+
+  return Object.entries(merged)
+    .filter(([, value]) => value > 0)
+    .map(([key, value]) => `${key}=${value}`)
+    .join("; ");
+}
+
+function getAggregateRuntimeIntervalMinutes(targets = []) {
+  const values = targets
+    .map((target) => normalizeSubscriptionUpdateIntervalMinutes(target?.upstreamConfig?.subscriptionUpdateIntervalMinutes))
+    .filter((value) => Number.isFinite(value) && value > 0);
+
+  if (values.length === 0) {
+    return 30;
+  }
+
+  return Math.min(...values);
+}
+
+function getAggregateSupportedTypes(upstreams, targets = []) {
+  const supportedTypes = new Set();
+
+  targets.forEach((target) => {
+    const upstream = getUpstreamSummary(upstreams, target.upstreamId);
+    (Array.isArray(upstream?.supportedTypes) ? upstream.supportedTypes : []).forEach((type) => {
+      supportedTypes.add(type);
+    });
+  });
+
+  if (supportedTypes.size === 0) {
+    RELAY_TYPES.forEach((type) => supportedTypes.add(type));
+  }
+
+  return Array.from(supportedTypes);
+}
+
+function getAggregateUpstreamSummary(upstreams, targets = [], sampleConfig = null) {
+  const label = formatAggregateSelectionLabel(targets) || "聚合模式";
+
+  return {
+    id: "__aggregate__",
+    label: "聚合模式",
+    apiVersion: 1,
+    moduleLabel: "aggregate",
+    description: label,
+    website: "",
+    docsUrl: "",
+    author: "",
+    capabilities: {
+      supportsStatusQuery: true,
+      supportsInviteCode: false,
+    },
+    supportedTypes: getAggregateSupportedTypes(upstreams, targets),
+    remark: label,
+    settingFields: [],
+    config: {
+      enabled: true,
+      name: "聚合模式",
+      remark: label,
+      runtimeMode: ACTIVE_UPSTREAM_MODES.AGGREGATE,
+      trafficThresholdPercent: 0,
+      maxRegistrationAgeMinutes: 0,
+      subscriptionUpdateIntervalMinutes: getAggregateRuntimeIntervalMinutes(targets),
+      inviteCode: "",
+      ...(sampleConfig || {}),
+    },
+    active: true,
+  };
+}
+
+function toTimestamp(value) {
+  const timestamp = new Date(value || "").getTime();
+  return Number.isFinite(timestamp) ? timestamp : 0;
+}
+
+function pickLatestIso(values = []) {
+  const sorted = values
+    .map((value) => (value || "").toString().trim())
+    .filter(Boolean)
+    .sort((left, right) => toTimestamp(right) - toTimestamp(left));
+  return sorted[0] || "";
+}
+
+function pickEarliestIso(values = []) {
+  const sorted = values
+    .map((value) => (value || "").toString().trim())
+    .filter(Boolean)
+    .sort((left, right) => toTimestamp(left) - toTimestamp(right));
+  return sorted[0] || "";
+}
+
+function buildAggregateUsageSummary(targets = []) {
+  const usages = targets
+    .map((target) => target?.userState?.latestUsage)
+    .filter((usage) => usage && typeof usage === "object");
+
+  if (usages.length === 0) {
+    return null;
+  }
+
+  const transferEnable = usages.reduce((sum, usage) => sum + (usage.transferEnable || 0), 0);
+  const usedUpload = usages.reduce((sum, usage) => sum + (usage.usedUpload || 0), 0);
+  const usedDownload = usages.reduce((sum, usage) => sum + (usage.usedDownload || 0), 0);
+  const usedTotal = usages.reduce((sum, usage) => sum + (usage.usedTotal || 0), 0);
+  const remainingTraffic = usages.reduce(
+    (sum, usage) =>
+      sum +
+      (typeof usage.remainingTraffic === "number"
+        ? usage.remainingTraffic
+        : Math.max((usage.transferEnable || 0) - (usage.usedTotal || 0), 0)),
+    0,
+  );
+  const remainingPercent = transferEnable > 0 ? (remainingTraffic / transferEnable) * 100 : null;
+  const usagePercent = transferEnable > 0 ? (usedTotal / transferEnable) * 100 : null;
+
+  return {
+    queriedAt: pickLatestIso(usages.map((usage) => usage.queriedAt)),
+    email: `已聚合 ${targets.length} 份上游`,
+    planId: null,
+    planName: "聚合模式",
+    resetDay: null,
+    expiredAt: pickEarliestIso(usages.map((usage) => usage.expiredAt)),
+    accountCreatedAt: pickEarliestIso(usages.map((usage) => usage.accountCreatedAt)),
+    lastLoginAt: pickLatestIso(usages.map((usage) => usage.lastLoginAt)),
+    transferEnable,
+    usedUpload,
+    usedDownload,
+    usedTotal,
+    remainingTraffic,
+    remainingPercent,
+    usagePercent,
+    stat: {
+      aggregated: true,
+      sourceCount: targets.length,
+    },
+    upstreamSite: formatAggregateSelectionLabel(targets),
+  };
+}
+
+function buildAggregateHistory(targets = []) {
+  return targets
+    .flatMap((target) =>
+      (Array.isArray(target?.userState?.history) ? target.userState.history : []).map((entry) => ({
+        ...entry,
+        title: `[${target.instanceLabel || target.upstreamId}] ${entry.title || ""}`.trim(),
+        message: entry.message || "",
+        details: {
+          ...(entry.details && typeof entry.details === "object" ? entry.details : {}),
+          aggregate: true,
+          instanceLabel: target.instanceLabel || target.upstreamId,
+          storageKey: target.storageKey || target.upstreamId,
+        },
+      })),
+    )
+    .sort((left, right) => toTimestamp(right.timestamp) - toTimestamp(left.timestamp))
+    .slice(0, 120);
+}
+
+function buildAggregateUserState(targets = [], failures = []) {
+  const successfulTargets = targets.filter((target) => target?.userState?.latestRegistration);
+  const latestRegistration = successfulTargets.length
+    ? {
+        email: `已聚合 ${successfulTargets.length} 份上游`,
+        password: "",
+        inviteCode: "",
+        createdAt: pickLatestIso(
+          successfulTargets.map((target) => target.userState.latestRegistration?.createdAt),
+        ),
+        accountCreatedAt: pickEarliestIso(
+          successfulTargets.map((target) => target.userState.latestRegistration?.accountCreatedAt),
+        ),
+        expiredAt: pickEarliestIso(
+          successfulTargets.map((target) => target.userState.latestRegistration?.expiredAt),
+        ),
+        mock: successfulTargets.every((target) => Boolean(target.userState.latestRegistration?.mock)),
+        upstreamSite: formatAggregateSelectionLabel(successfulTargets),
+        apiBase: "",
+        entryUrl: "",
+        upstreamSource: "aggregate",
+        lastUsageCheckAt: pickLatestIso(
+          successfulTargets.map((target) => target.userState.latestRegistration?.lastUsageCheckAt),
+        ),
+      }
+    : null;
+
+  return {
+    latestRegistration,
+    latestUsage: buildAggregateUsageSummary(successfulTargets),
+    history: buildAggregateHistory(successfulTargets),
+    updatedAt: pickLatestIso(successfulTargets.map((target) => target.userState.updatedAt)),
+    aggregateFailures: failures,
+  };
+}
+
+function buildAggregateWarning(failures = []) {
+  if (!Array.isArray(failures) || failures.length === 0) {
+    return "";
+  }
+
+  return failures
+    .map((failure) => `${failure.instanceLabel || failure.upstreamId}: ${failure.error?.message || "Unknown error."}`)
+    .join(" | ");
+}
+
+function getContentTypeByRelayType(type, fallback = "text/plain; charset=utf-8") {
+  if (type === "clash") {
+    return "text/yaml; charset=utf-8";
+  }
+  if (type === "sing-box") {
+    return "application/json; charset=utf-8";
+  }
+  return fallback;
+}
+
+async function fetchResolvedSubscriptionSource(source, type, requestMethod = "GET") {
+  const latest = source?.userState?.latestRegistration;
+  if (!latest) {
+    throw new Error("No latest registration is available.");
+  }
+
+  const upstreamUrl = latest?.clientUrls?.[type];
+  if (!upstreamUrl) {
+    throw new Error(`Unsupported relay type: ${type}`);
+  }
+
+  const subscriptionUpdateIntervalMinutes = normalizeSubscriptionUpdateIntervalMinutes(
+    source?.upstreamConfig?.subscriptionUpdateIntervalMinutes,
+  );
+  const profileUpdateIntervalHours = toProfileUpdateIntervalHours(subscriptionUpdateIntervalMinutes);
+
+  if (latest.mock) {
+    return {
+      headers: {
+        "content-type": "text/plain; charset=utf-8",
+        "profile-title": `Snail Mock ${type}`,
+        "profile-update-interval": profileUpdateIntervalHours,
+      },
+      body:
+        requestMethod === "HEAD"
+          ? Buffer.alloc(0)
+          : Buffer.from(
+              [
+                "# Mock relay subscription",
+                `type=${type}`,
+                `email=${latest.email}`,
+                `createdAt=${latest.createdAt || ""}`,
+              ].join("\n"),
+              "utf8",
+            ),
+    };
+  }
+
+  const upstreamResponse = await fetchUpstreamSubscription(upstreamUrl);
+  if (!upstreamResponse.ok) {
+    const nextError = new Error(
+      `Upstream subscription request failed with status ${upstreamResponse.status}.`,
+    );
+    nextError.status = upstreamResponse.status;
+    throw nextError;
+  }
+
+  const headers = {};
+  upstreamResponse.headers.forEach((value, key) => {
+    const normalizedKey = key.toLowerCase();
+    if (FORWARDED_HEADERS.has(normalizedKey)) {
+      headers[normalizedKey] = value;
+    }
+  });
+
+  if (!headers["subscription-userinfo"]) {
+    const fallbackUserInfoHeader = await fetchFallbackSubscriptionUserInfoHeader(
+      latest?.clientUrls,
+      type,
+    );
+    if (fallbackUserInfoHeader) {
+      headers["subscription-userinfo"] = fallbackUserInfoHeader;
+    }
+  }
+
+  headers["profile-update-interval"] = profileUpdateIntervalHours;
+
+  const body =
+    requestMethod === "HEAD"
+      ? Buffer.alloc(0)
+      : sanitizeSubscriptionBody(Buffer.from(await upstreamResponse.arrayBuffer()));
+
+  return {
+    headers,
+    body,
+  };
+}
+
+async function buildAggregateResponse(request, userKey, type, targets, failures = [], warning = "") {
+  const relayToken = await getRelayToken(userKey);
+  const relayUrls = buildRelayUrls(await getRequestOrigin(request), relayToken);
+  const upstreams = await listUpstreamConfigs();
+  const user = RELAY_USERS.find((item) => item.key === userKey) || RELAY_USERS[0];
+  const aggregateUpstream = getAggregateUpstreamSummary(upstreams, targets);
+  const aggregateUserState = buildAggregateUserState(targets, failures);
+  const aggregateWarning = [warning, buildAggregateWarning(failures)].filter(Boolean).join(" | ");
+
+  return {
+    ...shapeRegistrationResponse(
+      user,
+      aggregateUpstream,
+      aggregateUserState,
+      type,
+      relayUrls,
+      aggregateWarning,
+    ),
+    aggregate: {
+      enabled: true,
+      label: formatAggregateSelectionLabel(targets),
+      sourceCount: targets.length,
+      failureCount: failures.length,
+      sources: targets.map((target) => ({
+        upstreamId: target.upstreamId,
+        storageKey: target.storageKey,
+        instanceNumber: target.instanceNumber,
+        label: target.instanceLabel || target.upstreamId,
+        hasRegistration: Boolean(target?.userState?.latestRegistration),
+      })),
+    },
+  };
+}
+
 async function handleLogin(request, response) {
   const body = await readJsonBody(request);
   const password = (body.password || "").toString();
@@ -822,7 +1221,7 @@ async function handleSession(request, response) {
   const origin = await getRequestOrigin(request);
   await ensureCloudUpstreamsReady();
   const [
-    { activeUpstreamId, activeUpstreamMode, upstreamOrder },
+    { activeUpstreamId, activeUpstreamMode, upstreamOrder, upstreamAggregation },
     displayOrigin,
     relayUsers,
     appUpdate,
@@ -856,6 +1255,7 @@ async function handleSession(request, response) {
     activeUpstreamId,
     activeUpstreamMode,
     upstreamOrder,
+    upstreamAggregation,
     upstreams,
     runtimeModes: {
       alwaysRefresh: RUNTIME_MODES.ALWAYS_REFRESH,
@@ -864,6 +1264,7 @@ async function handleSession(request, response) {
     activeUpstreamModes: {
       single: ACTIVE_UPSTREAM_MODES.SINGLE,
       polling: ACTIVE_UPSTREAM_MODES.POLLING,
+      aggregate: ACTIVE_UPSTREAM_MODES.AGGREGATE,
     },
     users: relayUsers.map((user) => ({
       key: user.key,
@@ -902,6 +1303,7 @@ async function handleUpdateSettings(request, response) {
     activeUpstreamId: body.activeUpstreamId,
     activeUpstreamMode: body.activeUpstreamMode,
     upstreamOrder: body.upstreamOrder,
+    upstreamAggregation: body.upstreamAggregation,
     upstreamCloud: body.upstreamCloud,
     upstreamId: body.upstreamId,
     runtimeMode: body.runtimeMode,
@@ -926,6 +1328,7 @@ async function handleUpdateSettings(request, response) {
     activeUpstreamMode: result.activeUpstreamMode,
     displayOrigin: result.displayOrigin,
     upstreamOrder: result.upstreamOrder,
+    upstreamAggregation: result.upstreamAggregation,
     upstreamCloud: result.upstreamCloud,
     updatedAt: result.updatedAt,
     upstreamConfig: result.upstreamConfig,
@@ -1020,6 +1423,29 @@ async function handleCreateSubscription(request, response) {
     return;
   }
 
+  const runtime = await getActiveUpstreamRuntime();
+  if (
+    !requestedUpstreamId &&
+    runtime.activeUpstreamMode === ACTIVE_UPSTREAM_MODES.AGGREGATE
+  ) {
+    const aggregateResult = await manualRegisterAggregateWithRuntime(userKey, {
+      relayType: type === "full" ? "universal" : type,
+    });
+
+    sendJson(response, 200, {
+      success: true,
+      message: "Aggregate registration completed.",
+      ...(await buildAggregateResponse(
+        request,
+        userKey,
+        type,
+        aggregateResult.targets,
+        aggregateResult.failures,
+      )),
+    });
+    return;
+  }
+
   const result = await manualRegisterWithRuntime(userKey, {
     inviteCode,
     relayType: type === "full" ? "universal" : type,
@@ -1030,7 +1456,7 @@ async function handleCreateSubscription(request, response) {
   const upstreams = await listUpstreamConfigs();
   const upstream = getUpstreamSummary(
     upstreams,
-    result.upstreamId || requestedUpstreamId || (await getActiveUpstreamId()),
+    result.upstreamId || requestedUpstreamId || runtime.activeUpstreamId,
   );
   const user = RELAY_USERS.find((item) => item.key === userKey) || RELAY_USERS[0];
 
@@ -1081,13 +1507,33 @@ async function handleGenerateQrCode(request, response) {
 async function handleLatestSubscription(request, response, url) {
   const type = normalizeType(url.searchParams.get("type"));
   const userKey = normalizeUserKey(url.searchParams.get("user"));
-  const upstreamId = (url.searchParams.get("upstreamId") || (await getActiveUpstreamId())).toString();
+  const runtime = await getActiveUpstreamRuntime();
+  const upstreamId = (url.searchParams.get("upstreamId") || runtime.activeUpstreamId).toString();
 
   if (!SUPPORTED_TYPES.has(type)) {
     sendJson(response, 400, {
       success: false,
       error: `Unsupported type: ${type}`,
       supportedTypes: Array.from(SUPPORTED_TYPES),
+    });
+    return;
+  }
+
+  if (!url.searchParams.get("upstreamId") && runtime.activeUpstreamMode === ACTIVE_UPSTREAM_MODES.AGGREGATE) {
+    const result = await resolveAggregateViewStates(userKey, type === "full" ? "universal" : type);
+
+    sendJson(response, 200, {
+      success: true,
+      message: result.targets.length > 0
+        ? "Latest aggregate user state returned."
+        : "Current aggregate has no registration yet.",
+      ...(await buildAggregateResponse(
+        request,
+        userKey,
+        type,
+        result.targets,
+        result.failures,
+      )),
     });
     return;
   }
@@ -1114,6 +1560,116 @@ async function proxySubscription(response, request, type, url) {
 
   if (!relayUser) {
     sendText(response, 403, "Invalid subscription token.");
+    return;
+  }
+
+  const runtime = await getActiveUpstreamRuntime();
+  if (runtime.activeUpstreamMode === ACTIVE_UPSTREAM_MODES.AGGREGATE) {
+    const aggregateResult = await resolveAggregateRelayStates(relayUser.key, type);
+    if (aggregateResult.targets.length === 0) {
+      sendText(response, 503, "No aggregate upstream is available.");
+      return;
+    }
+
+    const fetchResults = await Promise.allSettled(
+      aggregateResult.targets.map(async (target) => {
+        const payload = await fetchResolvedSubscriptionSource(target, type, request.method);
+        await appendUserHistory(relayUser.key, target.storageKey || target.upstreamId, {
+          action: "relay_success",
+          title: "已成功中转聚合订阅",
+          message: `客户端成功拉取 ${type} 聚合订阅。`,
+          mode: ACTIVE_UPSTREAM_MODES.AGGREGATE,
+          relayType: type,
+          requestSource: "relay",
+          registration: target?.userState?.latestRegistration || null,
+          usage: target?.userState?.latestUsage || null,
+          details: {
+            aggregate: true,
+            instanceLabel: target.instanceLabel || target.upstreamId,
+            storageKey: target.storageKey || target.upstreamId,
+          },
+        });
+        return {
+          target,
+          payload,
+        };
+      }),
+    );
+
+    const successfulFetches = [];
+    const failedFetches = [...aggregateResult.failures];
+
+    fetchResults.forEach((result, index) => {
+      if (result.status === "fulfilled") {
+        successfulFetches.push(result.value);
+        return;
+      }
+
+      const failedTarget = aggregateResult.targets[index] || null;
+      if (failedTarget) {
+        appendUserHistory(relayUser.key, failedTarget.storageKey || failedTarget.upstreamId, {
+          action: "relay_failed",
+          title: "聚合订阅拉取失败",
+          message:
+            result.reason instanceof Error ? result.reason.message : `${result.reason || "Unknown error."}`,
+          mode: ACTIVE_UPSTREAM_MODES.AGGREGATE,
+          relayType: type,
+          requestSource: "relay",
+          registration: failedTarget?.userState?.latestRegistration || null,
+          usage: failedTarget?.userState?.latestUsage || null,
+          details: {
+            aggregate: true,
+            instanceLabel: failedTarget.instanceLabel || failedTarget.upstreamId,
+            storageKey: failedTarget.storageKey || failedTarget.upstreamId,
+          },
+        }).catch(() => undefined);
+      }
+      failedFetches.push({
+        ...(failedTarget || {}),
+        error: result.reason instanceof Error ? result.reason : new Error(`${result.reason || "Unknown error."}`),
+      });
+    });
+
+    if (successfulFetches.length === 0) {
+      sendText(
+        response,
+        502,
+        `Aggregate subscription request failed: ${buildAggregateWarning(failedFetches) || "Unknown error."}`,
+      );
+      return;
+    }
+
+    const mergedIntervalHours = toProfileUpdateIntervalHours(
+      getAggregateRuntimeIntervalMinutes(successfulFetches.map((entry) => entry.target)),
+    );
+    const mergedHeaders = {
+      "content-type": getContentTypeByRelayType(
+        type,
+        successfulFetches[0]?.payload?.headers?.["content-type"] || "text/plain; charset=utf-8",
+      ),
+      "profile-title": `Snail Aggregate ${type}`,
+      "profile-update-interval": mergedIntervalHours,
+    };
+    const mergedUserInfo = mergeSubscriptionUserInfoHeaders(
+      successfulFetches.map((entry) => entry.payload.headers["subscription-userinfo"] || ""),
+    );
+    if (mergedUserInfo) {
+      mergedHeaders["subscription-userinfo"] = mergedUserInfo;
+    }
+
+    response.writeHead(200, mergedHeaders);
+    if (request.method === "HEAD") {
+      response.end();
+      return;
+    }
+
+    const mergedBody = sanitizeSubscriptionBody(
+      mergeSubscriptionBodies(
+        type,
+        successfulFetches.map((entry) => entry.payload.body),
+      ),
+    );
+    response.end(mergedBody);
     return;
   }
 
@@ -1263,15 +1819,33 @@ async function proxySubscription(response, request, type, url) {
 
 async function handleHealth(response) {
   const relayState = await loadRelayState();
-  const activeUpstreamId = await getActiveUpstreamId();
-  const latestRegistrationAvailable = Object.values(relayState.users || {}).some((userState) =>
-    Boolean(userState?.upstreams?.[activeUpstreamId]?.latestRegistration),
-  );
+  const runtime = await getActiveUpstreamRuntime();
+  const latestRegistrationAvailable =
+    runtime.activeUpstreamMode === ACTIVE_UPSTREAM_MODES.AGGREGATE
+      ? Object.values(relayState.users || {}).some((userState) =>
+          (runtime.upstreamAggregation?.counts ? Object.entries(runtime.upstreamAggregation.counts) : []).some(
+            ([upstreamId, copies]) => {
+              const count = Number.parseInt(copies, 10);
+              if (!Number.isFinite(count) || count <= 0) {
+                return false;
+              }
+
+              return Array.from({ length: count }).some((_, index) => {
+                const storageKey = index === 0 ? upstreamId : `${upstreamId}::${index + 1}`;
+                return Boolean(userState?.upstreams?.[storageKey]?.latestRegistration);
+              });
+            },
+          ),
+        )
+      : Object.values(relayState.users || {}).some((userState) =>
+          Boolean(userState?.upstreams?.[runtime.activeUpstreamId]?.latestRegistration),
+        );
 
   sendJson(response, 200, {
     success: true,
     status: "ok",
-    activeUpstreamId,
+    activeUpstreamId: runtime.activeUpstreamId,
+    activeUpstreamMode: runtime.activeUpstreamMode,
     latestRegistrationAvailable,
   });
 }
