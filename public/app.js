@@ -55,6 +55,7 @@ const upstreamEnabledInput = document.querySelector("#upstreamEnabled");
 const upstreamInviteCodeInput = document.querySelector("#upstreamInviteCode");
 const trafficThresholdInput = document.querySelector("#trafficThresholdPercent");
 const maxRegistrationAgeInput = document.querySelector("#maxRegistrationAgeMinutes");
+const subscriptionUpdateIntervalInput = document.querySelector("#subscriptionUpdateIntervalMinutes");
 
 const loginButton = document.querySelector("#loginButton");
 const registerButton = document.querySelector("#registerButton");
@@ -245,6 +246,7 @@ function getActiveUpstream() {
         runtimeMode: "always_refresh",
         trafficThresholdPercent: 20,
         maxRegistrationAgeMinutes: 120,
+        subscriptionUpdateIntervalMinutes: 30,
         inviteCode: "",
         settings: {},
       },
@@ -300,15 +302,16 @@ function formatPercent(value) {
 
 function describeMode(upstream) {
   const config = upstream?.config || {};
+  const updateIntervalText = `${config.subscriptionUpdateIntervalMinutes ?? 30} 分钟自动更新`;
   if (config.runtimeMode === "smart_usage") {
     const ageRule =
       Number(config.maxRegistrationAgeMinutes) > 0
         ? `，或账号年龄超过 ${config.maxRegistrationAgeMinutes} 分钟`
         : "";
-    return `智能模式：仅在客户端拉取或管理查看时查询上游；当剩余流量低于 ${config.trafficThresholdPercent}%${ageRule} 时重新注册。`;
+    return `智能模式：仅在客户端拉取或管理查看时查询上游；当剩余流量低于 ${config.trafficThresholdPercent}%${ageRule} 时重新注册；下游订阅按 ${updateIntervalText}。`;
   }
 
-  return "兼容模式：客户端每次拉取都会直接重新注册当前上游，不做查询判断。";
+  return `兼容模式：客户端每次拉取都会直接重新注册当前上游，不做查询判断；下游订阅按 ${updateIntervalText}。`;
 }
 
 function fillMeta(registration) {
@@ -544,6 +547,7 @@ function syncUpstreamForm() {
   setInputValue(upstreamInviteCodeInput, config.inviteCode || "");
   setInputValue(trafficThresholdInput, config.trafficThresholdPercent ?? 20);
   setInputValue(maxRegistrationAgeInput, config.maxRegistrationAgeMinutes ?? 120);
+  setInputValue(subscriptionUpdateIntervalInput, config.subscriptionUpdateIntervalMinutes ?? 30);
 
   const radio = upstreamForm?.querySelector(`input[name="runtimeMode"][value="${config.runtimeMode || "always_refresh"}"]`);
   if (radio) {
@@ -847,6 +851,10 @@ if (upstreamForm) {
           runtimeMode: (formData.get("runtimeMode") || "").toString(),
           trafficThresholdPercent: Number.parseInt(formData.get("trafficThresholdPercent"), 10),
           maxRegistrationAgeMinutes: Number.parseInt(formData.get("maxRegistrationAgeMinutes"), 10),
+          subscriptionUpdateIntervalMinutes: Number.parseInt(
+            formData.get("subscriptionUpdateIntervalMinutes"),
+            10,
+          ),
           providerSettings,
         }),
       });

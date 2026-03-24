@@ -292,6 +292,7 @@ function shapeRegistrationResponse(user, upstream, userState, type, relayUrls, w
     runtimeMode: upstream?.config?.runtimeMode || "",
     trafficThresholdPercent: upstream?.config?.trafficThresholdPercent ?? 20,
     maxRegistrationAgeMinutes: upstream?.config?.maxRegistrationAgeMinutes ?? 0,
+    subscriptionUpdateIntervalMinutes: upstream?.config?.subscriptionUpdateIntervalMinutes ?? 30,
     type,
     subscriptionUrl,
     relayUrls,
@@ -539,6 +540,7 @@ async function handleUpdateSettings(request, response) {
     runtimeMode: body.runtimeMode,
     trafficThresholdPercent: body.trafficThresholdPercent,
     maxRegistrationAgeMinutes: body.maxRegistrationAgeMinutes,
+    subscriptionUpdateIntervalMinutes: body.subscriptionUpdateIntervalMinutes,
     inviteCode: body.inviteCode,
     name: body.name,
     remark: body.remark,
@@ -640,9 +642,17 @@ async function proxySubscription(response, request, type, url) {
   }
 
   const upstreamId = await getActiveUpstreamId();
-  const { runtimeMode, userState } = await resolveRelayState(relayUser.key, upstreamId, type);
+  const { runtimeMode, upstreamConfig, userState } = await resolveRelayState(
+    relayUser.key,
+    upstreamId,
+    type,
+  );
   const latest = userState.latestRegistration;
   const upstreamUrl = latest?.clientUrls?.[type];
+  const subscriptionUpdateIntervalMinutes = Math.max(
+    1,
+    Number.parseInt(upstreamConfig?.subscriptionUpdateIntervalMinutes || "30", 10) || 30,
+  );
 
   if (!upstreamUrl) {
     sendText(response, 400, `Unsupported relay type: ${type}`);
@@ -674,6 +684,7 @@ async function proxySubscription(response, request, type, url) {
       ].join("\n"),
       {
         "profile-title": `Snail Mock ${type}`,
+        "profile-update-interval": String(subscriptionUpdateIntervalMinutes),
       },
     );
     return;
@@ -738,6 +749,7 @@ async function proxySubscription(response, request, type, url) {
       headers[key] = value;
     }
   });
+  headers["profile-update-interval"] = String(subscriptionUpdateIntervalMinutes);
 
   const body = Buffer.from(await upstreamResponse.arrayBuffer());
   response.writeHead(200, headers);

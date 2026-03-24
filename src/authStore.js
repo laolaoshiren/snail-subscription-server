@@ -330,6 +330,10 @@ async function updatePanelSettings(settings = {}) {
         settings.maxRegistrationAgeMinutes === undefined
           ? currentConfig.maxRegistrationAgeMinutes
           : settings.maxRegistrationAgeMinutes,
+      subscriptionUpdateIntervalMinutes:
+        settings.subscriptionUpdateIntervalMinutes === undefined
+          ? currentConfig.subscriptionUpdateIntervalMinutes
+          : settings.subscriptionUpdateIntervalMinutes,
       inviteCode:
         settings.inviteCode === undefined ? currentConfig.inviteCode : settings.inviteCode,
       name: settings.name === undefined ? currentConfig.name : settings.name,

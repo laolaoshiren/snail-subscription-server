@@ -56,6 +56,7 @@ function createSnailVendor(options = {}) {
       runtimeMode: "always_refresh",
       trafficThresholdPercent: 20,
       maxRegistrationAgeMinutes: 120,
+      subscriptionUpdateIntervalMinutes: 30,
       inviteCode: "",
       settings: {
         entryUrl: "",
@@ -81,6 +82,13 @@ function createSnailVendor(options = {}) {
       maxRegistrationAgeMinutes: normalizePositiveInteger(
         source.maxRegistrationAgeMinutes,
         defaults.maxRegistrationAgeMinutes,
+      ),
+      subscriptionUpdateIntervalMinutes: Math.max(
+        1,
+        normalizePositiveInteger(
+          source.subscriptionUpdateIntervalMinutes,
+          defaults.subscriptionUpdateIntervalMinutes,
+        ),
       ),
       inviteCode: normalizeString(source.inviteCode),
       settings: {
