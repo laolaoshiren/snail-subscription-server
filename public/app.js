@@ -380,7 +380,7 @@ function describeMode(upstream) {
   const config = upstream?.config || {};
   const updateIntervalText = `${config.subscriptionUpdateIntervalMinutes ?? 30} 分钟自动更新`;
   if (!upstreamSupportsStatusQuery(upstream)) {
-    return `当前上游未实现状态查询接口，仅支持兼容模式；下游订阅按 ${updateIntervalText}。`;
+    return `仅兼容模式，${updateIntervalText}。`;
   }
 
   if (config.runtimeMode === "smart_usage") {
@@ -388,10 +388,10 @@ function describeMode(upstream) {
       Number(config.maxRegistrationAgeMinutes) > 0
         ? `，或账号年龄超过 ${config.maxRegistrationAgeMinutes} 分钟`
         : "";
-    return `智能模式：仅在客户端拉取或管理查看时查询上游；当剩余流量低于 ${config.trafficThresholdPercent}%${ageRule} 时重新注册；下游订阅按 ${updateIntervalText}。`;
+    return `智能模式：低于 ${config.trafficThresholdPercent}%${ageRule} 时重注，${updateIntervalText}。`;
   }
 
-  return `兼容模式：客户端每次拉取都会直接重新注册当前上游，不做查询判断；下游订阅按 ${updateIntervalText}。`;
+  return `兼容模式：每次拉取都重注，${updateIntervalText}。`;
 }
 
 function describeRuntimeSelection(upstream = getActiveUpstream()) {
@@ -403,10 +403,10 @@ function describeRuntimeSelection(upstream = getActiveUpstream()) {
     .filter((item) => item?.config?.enabled !== false)
     .map((item) => item.label);
   if (enabledNames.length === 0) {
-    return "轮询模式：当前没有可用的启用上游，请先启用至少一个上游。";
+    return "轮询模式：暂无可用上游。";
   }
 
-  return `轮询模式：下游请求会按左侧排序顺序依次尝试已启用上游，直到某个上游注册成功并返回结果。当前顺序：${enabledNames.join(" → ")}。`;
+  return `轮询模式：按顺序尝试。${enabledNames.join(" → ")}`;
 }
 
 function selectUpstreamConfig(upstreamId) {
@@ -562,9 +562,6 @@ function renderLinks(relayUrls, upstream = getActiveUpstream()) {
     const foot = document.createElement("div");
     foot.className = "link-foot";
 
-    const hint = document.createElement("small");
-    hint.textContent = "固定链接，切换上游后仍保持不变";
-
     const button = document.createElement("button");
     button.className = "ghost-button small-button";
     button.type = "button";
@@ -575,10 +572,10 @@ function renderLinks(relayUrls, upstream = getActiveUpstream()) {
       }
 
       await copyText(url);
-      setStatus(`${label} 固定订阅链接已复制。`, "success");
+      setStatus(`${label} 链接已复制。`, "success");
     });
 
-    foot.append(hint, button);
+    foot.append(button);
     card.append(head, input, foot);
     linksList.appendChild(card);
   });
@@ -865,8 +862,8 @@ function syncUpstreamForm() {
   if (registerInviteCodeInput) {
     registerInviteCodeInput.disabled = !runtimeSupportsInviteCode;
     registerInviteCodeInput.placeholder = runtimeSupportsInviteCode
-      ? "可选，不填则使用当前运行上游默认邀请码"
-      : "当前运行上游不支持邀请码";
+      ? "可选，默认用当前上游邀请码"
+      : "当前上游不支持邀请码";
   }
 
   const radio = upstreamForm?.querySelector(`input[name="runtimeMode"][value="${config.runtimeMode || "always_refresh"}"]`);
@@ -993,7 +990,7 @@ async function switchActiveUpstream(upstreamId) {
     setStatus(
       isPollingMode()
         ? "已切换到轮询模式。下游请求会按排序顺序自动尝试上游。"
-        : `已切换到 ${getActiveUpstream().label}。下游固定订阅链接不会变化。`,
+        : `已切换到 ${getActiveUpstream().label}。`,
       "success",
     );
   } catch (error) {
@@ -1232,7 +1229,7 @@ if (upstreamForm) {
       });
 
       await refreshSession();
-      setStatus("当前上游配置已更新。下游固定订阅链接未变化。", "success");
+      setStatus("当前上游配置已更新。", "success");
     } catch (error) {
       if (error.status === 401) {
         showLogin();

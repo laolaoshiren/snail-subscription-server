@@ -14,7 +14,7 @@
           <div class="auth-brand">
             <p class="eyebrow">Relay Console</p>
             <h1>Snail 中转订阅面板</h1>
-            <p>固定订阅链接只按用户区分。切换上游或修改上游配置，只会改变服务端背后的中转来源，不会改变下游客户端保存的链接。</p>
+            <p>统一管理中转订阅与上游配置。</p>
           </div>
 
           <section class="panel auth-card">
@@ -58,7 +58,7 @@
             <div class="header-copy">
               <p class="eyebrow">Server Relay</p>
               <h1>Snail 中转订阅面板</h1>
-              <p>运行上游与下游固定链接解耦。以后新增上游时，只需要接入新的上游模块，不需要再大改核心页面和路由。</p>
+              <p>集中管理订阅、中转和上游。</p>
             </div>
 
             <div class="header-actions">
@@ -75,7 +75,7 @@
               <div class="switch-block">
                 <div class="switch-head">
                   <strong>当前运行上游</strong>
-                  <small>切换后仅改变服务端中转来源，不改变任何用户固定订阅链接。</small>
+                  <small>切换中转来源。</small>
                 </div>
                 <select id="upstreamSwitcher" class="scope-select" aria-label="选择当前运行上游"></select>
               </div>
@@ -83,7 +83,7 @@
               <div id="userScopePanel" class="switch-block">
                 <div class="switch-head">
                   <strong>当前查看用户</strong>
-                  <small>订阅页和日志页都基于这里选择的用户显示。</small>
+                  <small>订阅页与日志页共用。</small>
                 </div>
                 <div id="userSwitcher" class="switcher-grid compact-switcher"></div>
               </div>
@@ -97,7 +97,7 @@
               <section class="panel context-panel">
                 <div class="panel-head compact-head">
                   <h2>当前状态</h2>
-                  <p>这里展示当前运行上游下，这个用户的最新注册信息和快速操作。</p>
+                  <p>查看当前用户的最新记录。</p>
                 </div>
 
                 <div class="context-stack">
@@ -118,7 +118,7 @@
                 <form id="registerForm" class="stack-form compact-form">
                   <label>
                     <span>本次注册邀请码</span>
-                    <input id="inviteCode" name="inviteCode" type="text" placeholder="可选，不填则使用当前上游默认邀请码" />
+                    <input id="inviteCode" name="inviteCode" type="text" placeholder="可选，默认用当前上游邀请码" />
                   </label>
 
                   <button id="registerButton" class="primary-button" type="submit">立即重新注册当前上游</button>
@@ -158,8 +158,8 @@
 
               <section class="panel links-panel">
                 <div class="panel-head compact-head">
-                  <h2>固定服务器订阅链接</h2>
-                  <p>下方链接只跟用户 token 绑定。无论切换上游还是修改上游配置，这些链接都不会改变。</p>
+                  <h2>订阅链接</h2>
+                  <p>按用户固定生成。</p>
                 </div>
 
                 <div id="linksList" class="links-grid"></div>
@@ -173,7 +173,7 @@
               <section class="panel usage-panel">
                 <div class="panel-head compact-head">
                   <h2>流量与到期</h2>
-                  <p>只有管理查看和客户端拉取时才会查询上游，这里展示当前用户在当前上游下最近一次查询结果。</p>
+                  <p>显示最近一次查询结果。</p>
                 </div>
 
                 <div id="usageGrid" class="usage-grid usage-grid-dense"></div>
@@ -183,7 +183,7 @@
               <section class="panel history-panel">
                 <div class="panel-head compact-head">
                   <h2>历史日志</h2>
-                  <p>按时间倒序显示当前用户在当前上游下的注册、查询、中转和续期判断。</p>
+                  <p>按时间倒序显示。</p>
                 </div>
 
                 <div id="historyList" class="history-list"></div>
@@ -197,7 +197,7 @@
               <section class="panel upstream-list-panel">
                 <div class="panel-head compact-head">
                   <h2>上游列表</h2>
-                  <p>按当前名称排序显示。点击切换右侧详情，拖动顺序会自动保存，并影响轮询模式的尝试顺序。</p>
+                  <p>点击查看，拖动排序。</p>
                 </div>
                 <div id="upstreamList" class="upstream-list"></div>
               </section>
@@ -205,7 +205,7 @@
               <section class="panel upstream-form-panel">
                 <div class="panel-head compact-head">
                   <h2>上游详情</h2>
-                  <p>这里仅修改所选上游的配置。顶部“当前运行上游”仍负责控制单上游或轮询模式。</p>
+                  <p>这里只编辑所选上游。</p>
                 </div>
 
                 <div class="overview-stack upstream-detail-summary">
@@ -285,7 +285,7 @@
                       <input type="radio" name="runtimeMode" value="always_refresh" />
                       <span>
                         <strong>兼容模式</strong>
-                        <small>客户端每次拉取都重新注册，不查询当前上游状态。</small>
+                        <small>每次拉取都重新注册。</small>
                       </span>
                     </label>
 
@@ -293,7 +293,7 @@
                       <input type="radio" name="runtimeMode" value="smart_usage" />
                       <span>
                         <strong>智能模式</strong>
-                        <small>只在客户端拉取或管理查看时查询上游；按流量阈值和过期时间共同决定是否重新注册。</small>
+                        <small>按流量和时长决定是否重注。</small>
                       </span>
                     </label>
                   </div>
@@ -301,7 +301,7 @@
                   <div class="provider-fields-wrap">
                     <div class="provider-title">
                       <strong>连接参数</strong>
-                      <small>这些字段由当前上游适配器提供，用于连接实际的上游入口。</small>
+                      <small>由适配器提供。</small>
                     </div>
                     <div id="providerSettingsFields" class="provider-settings"></div>
                   </div>
@@ -317,7 +317,7 @@
               <section class="panel system-panel">
                 <div class="panel-head compact-head">
                   <h2>系统设置</h2>
-                  <p>这里只放全局配置，不放具体上游配置。上游逻辑统一在“上游”页管理。</p>
+                  <p>这里只放全局配置。</p>
                 </div>
 
                 <form id="systemForm" class="stack-form">
@@ -326,14 +326,14 @@
                     <input id="displayOrigin" name="displayOrigin" type="text" placeholder="例如 https://sub.example.com" />
                   </label>
 
-                  <p class="form-hint">留空时按当前公网地址显示。填写后，所有用户固定订阅链接都会按这个域名展示，但链接本身仍然只按用户 token 区分。</p>
+                  <p class="form-hint">留空则使用当前访问地址。</p>
 
                   <button id="saveSystemButton" class="primary-button" type="submit">保存系统设置</button>
                 </form>
 
                 <div class="tool-block">
                   <strong>热重载上游模块</strong>
-                  <p>当你通过 SSH 放入新的上游模块后，可以在这里直接重载，不需要重启整个项目。</p>
+                  <p>手动放入新模块后可直接重载。</p>
                   <button id="reloadUpstreamsButton" class="ghost-button" type="button">重新加载上游模块</button>
                 </div>
               </section>
@@ -341,7 +341,7 @@
               <section class="panel security-panel">
                 <div class="panel-head compact-head">
                   <h2>面板密码</h2>
-                  <p>这里仅负责面板登录密码，不负责任何上游配置。</p>
+                  <p>只修改面板登录密码。</p>
                 </div>
 
                 <form id="passwordForm" class="stack-form">
@@ -358,10 +358,6 @@
                   <button id="savePasswordButton" class="primary-button" type="submit">保存新密码</button>
                 </form>
 
-                <div class="system-note">
-                  <strong>固定链接规则</strong>
-                  <p>用户固定订阅链接只由用户 token 生成。切换上游、改模式、改邀请码、改入口域名，都不会改变客户端已经保存的固定链接。</p>
-                </div>
               </section>
             </div>
           </section>
