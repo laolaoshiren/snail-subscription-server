@@ -48,6 +48,7 @@ const {
   listUpstreamModuleDiagnostics,
   reloadUpstreamModules,
 } = require("./upstreams/core/registry");
+const { loadAggregateClashTemplate } = require("./aggregateClashTemplate");
 const { mergeSubscriptionBodies } = require("./subscriptionMerger");
 const { URL_TYPES } = require("./upstreams/shared/snailApi");
 const {
@@ -817,6 +818,20 @@ function parseSubscriptionUserInfo(headerValue = "") {
   return result;
 }
 
+function getSubscriptionUserInfoRemainingTraffic(entry = {}) {
+  const total = Number.isFinite(entry.total) ? entry.total : 0;
+  const upload = Number.isFinite(entry.upload) ? entry.upload : 0;
+  const download = Number.isFinite(entry.download) ? entry.download : 0;
+  return Math.max(total - upload - download, 0);
+}
+
+function formatSubscriptionUserInfo(entry = {}) {
+  return Object.entries(entry)
+    .filter(([, value]) => Number.isFinite(value) && value > 0)
+    .map(([key, value]) => `${key}=${value}`)
+    .join("; ");
+}
+
 function mergeSubscriptionUserInfoHeaders(headerValues = []) {
   const parsedValues = headerValues
     .map((value) => parseSubscriptionUserInfo(value))
@@ -826,26 +841,77 @@ function mergeSubscriptionUserInfoHeaders(headerValues = []) {
     return "";
   }
 
-  const merged = {
-    upload: 0,
-    download: 0,
-    total: 0,
-    expire: 0,
-  };
-
-  parsedValues.forEach((entry) => {
-    merged.upload += entry.upload || 0;
-    merged.download += entry.download || 0;
-    merged.total += entry.total || 0;
-    if (entry.expire > 0 && (merged.expire === 0 || entry.expire < merged.expire)) {
-      merged.expire = entry.expire;
+  const bestEntry = parsedValues.sort((left, right) => {
+    const remainingDiff = getSubscriptionUserInfoRemainingTraffic(right) - getSubscriptionUserInfoRemainingTraffic(left);
+    if (remainingDiff !== 0) {
+      return remainingDiff;
     }
-  });
 
-  return Object.entries(merged)
-    .filter(([, value]) => value > 0)
-    .map(([key, value]) => `${key}=${value}`)
-    .join("; ");
+    const totalDiff = (right.total || 0) - (left.total || 0);
+    if (totalDiff !== 0) {
+      return totalDiff;
+    }
+
+    return (right.expire || 0) - (left.expire || 0);
+  })[0];
+
+  return formatSubscriptionUserInfo(bestEntry);
+}
+
+function getUsageRemainingTraffic(usage) {
+  if (!usage || typeof usage !== "object") {
+    return 0;
+  }
+
+  if (typeof usage.remainingTraffic === "number" && Number.isFinite(usage.remainingTraffic)) {
+    return usage.remainingTraffic;
+  }
+
+  const transferEnable = typeof usage.transferEnable === "number" ? usage.transferEnable : 0;
+  const usedTotal = typeof usage.usedTotal === "number" ? usage.usedTotal : 0;
+  return Math.max(transferEnable - usedTotal, 0);
+}
+
+function pickAggregateDisplayTarget(targets = []) {
+  const sortableTargets = targets.filter((target) => target?.userState?.latestUsage);
+  if (sortableTargets.length === 0) {
+    return null;
+  }
+
+  return sortableTargets.sort((left, right) => {
+    const usageLeft = left.userState.latestUsage;
+    const usageRight = right.userState.latestUsage;
+    const remainingDiff = getUsageRemainingTraffic(usageRight) - getUsageRemainingTraffic(usageLeft);
+    if (remainingDiff !== 0) {
+      return remainingDiff;
+    }
+
+    const transferDiff = (usageRight.transferEnable || 0) - (usageLeft.transferEnable || 0);
+    if (transferDiff !== 0) {
+      return transferDiff;
+    }
+
+    return toTimestamp(usageRight.expiredAt) - toTimestamp(usageLeft.expiredAt);
+  })[0];
+}
+
+function pickAggregateSubscriptionUserInfoHeader(successfulFetches = []) {
+  const displayTarget = pickAggregateDisplayTarget(successfulFetches.map((entry) => entry.target));
+  const displayKey = displayTarget ? displayTarget.storageKey || displayTarget.upstreamId : "";
+
+  if (displayKey) {
+    const preferredEntry = successfulFetches.find(
+      (entry) => (entry.target?.storageKey || entry.target?.upstreamId || "") === displayKey,
+    );
+    const preferredHeader = (preferredEntry?.payload?.headers?.["subscription-userinfo"] || "").trim();
+    if (preferredHeader) {
+      return preferredHeader;
+    }
+  }
+
+  return mergeSubscriptionUserInfoHeaders(
+    successfulFetches.map((entry) => entry.payload?.headers?.["subscription-userinfo"] || ""),
+  );
 }
 
 function getAggregateRuntimeIntervalMinutes(targets = []) {
@@ -933,48 +999,22 @@ function pickEarliestIso(values = []) {
 }
 
 function buildAggregateUsageSummary(targets = []) {
-  const usages = targets
-    .map((target) => target?.userState?.latestUsage)
-    .filter((usage) => usage && typeof usage === "object");
+  const displayTarget = pickAggregateDisplayTarget(targets);
+  const displayUsage = displayTarget?.userState?.latestUsage;
 
-  if (usages.length === 0) {
+  if (!displayUsage) {
     return null;
   }
 
-  const transferEnable = usages.reduce((sum, usage) => sum + (usage.transferEnable || 0), 0);
-  const usedUpload = usages.reduce((sum, usage) => sum + (usage.usedUpload || 0), 0);
-  const usedDownload = usages.reduce((sum, usage) => sum + (usage.usedDownload || 0), 0);
-  const usedTotal = usages.reduce((sum, usage) => sum + (usage.usedTotal || 0), 0);
-  const remainingTraffic = usages.reduce(
-    (sum, usage) =>
-      sum +
-      (typeof usage.remainingTraffic === "number"
-        ? usage.remainingTraffic
-        : Math.max((usage.transferEnable || 0) - (usage.usedTotal || 0), 0)),
-    0,
-  );
-  const remainingPercent = transferEnable > 0 ? (remainingTraffic / transferEnable) * 100 : null;
-  const usagePercent = transferEnable > 0 ? (usedTotal / transferEnable) * 100 : null;
-
   return {
-    queriedAt: pickLatestIso(usages.map((usage) => usage.queriedAt)),
-    email: `已聚合 ${targets.length} 份上游`,
-    planId: null,
-    planName: "聚合模式",
-    resetDay: null,
-    expiredAt: pickEarliestIso(usages.map((usage) => usage.expiredAt)),
-    accountCreatedAt: pickEarliestIso(usages.map((usage) => usage.accountCreatedAt)),
-    lastLoginAt: pickLatestIso(usages.map((usage) => usage.lastLoginAt)),
-    transferEnable,
-    usedUpload,
-    usedDownload,
-    usedTotal,
-    remainingTraffic,
-    remainingPercent,
-    usagePercent,
+    ...displayUsage,
+    email: displayUsage.email || `展示流量来源：${displayTarget.instanceLabel || displayTarget.upstreamId}`,
+    planName: displayUsage.planName || "聚合模式",
     stat: {
-      aggregated: true,
+      ...(displayUsage.stat && typeof displayUsage.stat === "object" ? displayUsage.stat : {}),
+      aggregate: true,
       sourceCount: targets.length,
+      displaySource: displayTarget.instanceLabel || displayTarget.upstreamId,
     },
     upstreamSite: formatAggregateSelectionLabel(targets),
   };
@@ -1729,9 +1769,7 @@ async function proxySubscription(response, request, type, url) {
       "profile-title": `RelayHub Aggregate ${type}`,
       "profile-update-interval": mergedIntervalHours,
     };
-    const mergedUserInfo = mergeSubscriptionUserInfoHeaders(
-      successfulFetches.map((entry) => entry.payload.headers["subscription-userinfo"] || ""),
-    );
+    const mergedUserInfo = pickAggregateSubscriptionUserInfoHeader(successfulFetches);
     if (mergedUserInfo) {
       mergedHeaders["subscription-userinfo"] = mergedUserInfo;
     }
@@ -1742,10 +1780,17 @@ async function proxySubscription(response, request, type, url) {
       return;
     }
 
+    const clashTemplate = type === "clash" ? await loadAggregateClashTemplate() : null;
     const mergedBody = sanitizeSubscriptionBody(
       mergeSubscriptionBodies(
         type,
-        successfulFetches.map((entry) => entry.payload.body),
+        successfulFetches.map((entry) => ({
+          body: entry.payload.body,
+          sourceLabel: entry.target.instanceLabel || entry.target.upstreamId,
+        })),
+        {
+          clashTemplate,
+        },
       ),
     );
     response.end(mergedBody);

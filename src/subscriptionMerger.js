@@ -25,6 +25,10 @@ function encodeBase64(value) {
   return Buffer.from(value, "utf8").toString("base64");
 }
 
+function cloneSerializable(value) {
+  return JSON.parse(JSON.stringify(value));
+}
+
 function collectUniqueLines(values) {
   const seen = new Set();
   const lines = [];
@@ -47,6 +51,23 @@ function collectUniqueLines(values) {
   return lines;
 }
 
+function collectUniqueValues(values) {
+  const seen = new Set();
+  const result = [];
+
+  values.forEach((value) => {
+    const normalized = (value || "").toString();
+    if (!normalized || seen.has(normalized)) {
+      return;
+    }
+
+    seen.add(normalized);
+    result.push(normalized);
+  });
+
+  return result;
+}
+
 function buildUniqueName(name, usedNames) {
   const baseName = (name || "node").toString().trim() || "node";
   let candidate = baseName;
@@ -61,8 +82,49 @@ function buildUniqueName(name, usedNames) {
   return candidate;
 }
 
-function mergeUniversalBodies(bodyBuffers) {
-  const decodedSegments = bodyBuffers
+function normalizeSourceEntry(entry) {
+  if (Buffer.isBuffer(entry)) {
+    return {
+      bodyBuffer: entry,
+      sourceLabel: "",
+    };
+  }
+
+  const bodyBuffer = Buffer.isBuffer(entry?.body)
+    ? entry.body
+    : Buffer.isBuffer(entry?.bodyBuffer)
+      ? entry.bodyBuffer
+      : null;
+
+  if (!bodyBuffer) {
+    return null;
+  }
+
+  return {
+    bodyBuffer,
+    sourceLabel: (entry.sourceLabel || entry.instanceLabel || "").toString().trim(),
+  };
+}
+
+function normalizeSourceEntries(entries) {
+  return (Array.isArray(entries) ? entries : []).map(normalizeSourceEntry).filter(Boolean);
+}
+
+function appendSourceLabel(name, sourceLabel) {
+  const baseName = (name || "node").toString().trim() || "node";
+  if (!sourceLabel) {
+    return baseName;
+  }
+
+  return `${baseName} · ${sourceLabel}`;
+}
+
+function extractBodyBuffers(entries) {
+  return normalizeSourceEntries(entries).map((entry) => entry.bodyBuffer);
+}
+
+function mergeUniversalBodies(entries) {
+  const decodedSegments = extractBodyBuffers(entries)
     .map((bodyBuffer) => bodyBuffer.toString("utf8").trim())
     .map((body) => tryDecodeBase64(body) || body)
     .filter(Boolean);
@@ -70,12 +132,63 @@ function mergeUniversalBodies(bodyBuffers) {
   return Buffer.from(encodeBase64(lines.join("\n")), "utf8");
 }
 
-function mergeClashBodies(bodyBuffers) {
+function replaceTemplateProxyNames(values, templateProxyNameSet, mergedProxyNames) {
+  const nextValues = [];
+  let insertedMergedProxies = false;
+
+  values.forEach((value) => {
+    if (templateProxyNameSet.has(value)) {
+      if (!insertedMergedProxies) {
+        nextValues.push(...mergedProxyNames);
+        insertedMergedProxies = true;
+      }
+      return;
+    }
+
+    nextValues.push(value);
+  });
+
+  return collectUniqueValues(nextValues);
+}
+
+function mergeClashTemplate(template, proxies) {
+  const nextTemplate = cloneSerializable(template);
+  const templateProxyNames = collectUniqueValues(
+    (Array.isArray(nextTemplate?.proxies) ? nextTemplate.proxies : []).map((proxy) =>
+      proxy && typeof proxy === "object" ? proxy.name : "",
+    ),
+  );
+  const templateProxyNameSet = new Set(templateProxyNames);
+  const mergedProxyNames = proxies.map((proxy) => proxy.name).filter(Boolean);
+
+  nextTemplate.proxies = proxies;
+
+  if (Array.isArray(nextTemplate["proxy-groups"])) {
+    nextTemplate["proxy-groups"] = nextTemplate["proxy-groups"].map((group) => {
+      if (!group || typeof group !== "object" || !Array.isArray(group.proxies)) {
+        return group;
+      }
+
+      if (!group.proxies.some((value) => templateProxyNameSet.has(value))) {
+        return group;
+      }
+
+      return {
+        ...cloneSerializable(group),
+        proxies: replaceTemplateProxyNames(group.proxies, templateProxyNameSet, mergedProxyNames),
+      };
+    });
+  }
+
+  return nextTemplate;
+}
+
+function mergeClashBodies(entries, options = {}) {
   const usedNames = new Set();
   const proxies = [];
 
-  bodyBuffers.forEach((bodyBuffer) => {
-    const parsed = yaml.load(bodyBuffer.toString("utf8"));
+  normalizeSourceEntries(entries).forEach((entry) => {
+    const parsed = yaml.load(entry.bodyBuffer.toString("utf8"));
     const sourceProxies = Array.isArray(parsed?.proxies)
       ? parsed.proxies
       : Array.isArray(parsed)
@@ -87,31 +200,36 @@ function mergeClashBodies(bodyBuffers) {
         return;
       }
 
-      const nextProxy = { ...proxy };
-      nextProxy.name = buildUniqueName(nextProxy.name, usedNames);
+      const nextProxy = cloneSerializable(proxy);
+      nextProxy.name = buildUniqueName(
+        appendSourceLabel(nextProxy.name, entry.sourceLabel),
+        usedNames,
+      );
       proxies.push(nextProxy);
     });
   });
 
+  const mergedConfig =
+    options.clashTemplate && typeof options.clashTemplate === "object"
+      ? mergeClashTemplate(options.clashTemplate, proxies)
+      : {
+          proxies,
+        };
+
   return Buffer.from(
-    yaml.dump(
-      {
-        proxies,
-      },
-      {
-        noRefs: true,
-        lineWidth: -1,
-      },
-    ),
+    yaml.dump(mergedConfig, {
+      noRefs: true,
+      lineWidth: -1,
+    }),
     "utf8",
   );
 }
 
-function mergeSingBoxBodies(bodyBuffers) {
+function mergeSingBoxBodies(entries) {
   const usedTags = new Set();
   const outbounds = [];
 
-  bodyBuffers.forEach((bodyBuffer) => {
+  extractBodyBuffers(entries).forEach((bodyBuffer) => {
     const parsed = JSON.parse(bodyBuffer.toString("utf8"));
     const sourceOutbounds = Array.isArray(parsed?.outbounds)
       ? parsed.outbounds
@@ -146,30 +264,31 @@ function mergeSingBoxBodies(bodyBuffers) {
   );
 }
 
-function mergePlainTextBodies(bodyBuffers) {
-  const lines = collectUniqueLines(bodyBuffers.map((bodyBuffer) => bodyBuffer.toString("utf8")));
+function mergePlainTextBodies(entries) {
+  const lines = collectUniqueLines(extractBodyBuffers(entries).map((bodyBuffer) => bodyBuffer.toString("utf8")));
   return Buffer.from(lines.join("\n"), "utf8");
 }
 
-function mergeSubscriptionBodies(type, bodyBuffers) {
+function mergeSubscriptionBodies(type, entries, options = {}) {
   const normalizedType = (type || "").toString().trim().toLowerCase();
-  if (!Array.isArray(bodyBuffers) || bodyBuffers.length === 0) {
+  const sourceEntries = normalizeSourceEntries(entries);
+  if (sourceEntries.length === 0) {
     return Buffer.from("", "utf8");
   }
 
   if (normalizedType === "universal") {
-    return mergeUniversalBodies(bodyBuffers);
+    return mergeUniversalBodies(sourceEntries);
   }
 
   if (normalizedType === "clash") {
-    return mergeClashBodies(bodyBuffers);
+    return mergeClashBodies(sourceEntries, options);
   }
 
   if (normalizedType === "sing-box") {
-    return mergeSingBoxBodies(bodyBuffers);
+    return mergeSingBoxBodies(sourceEntries);
   }
 
-  return mergePlainTextBodies(bodyBuffers);
+  return mergePlainTextBodies(sourceEntries);
 }
 
 module.exports = {
