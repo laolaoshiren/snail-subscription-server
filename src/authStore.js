@@ -276,9 +276,17 @@ async function listUpstreamConfigs() {
 
   return listUpstreamModules().map((module) => ({
     id: module.manifest.id,
+    apiVersion: module.manifest.apiVersion,
     label: state.upstreams[module.manifest.id]?.name || module.manifest.label,
     moduleLabel: module.manifest.label,
     description: module.manifest.description || "",
+    website: module.manifest.website || "",
+    docsUrl: module.manifest.docsUrl || "",
+    author: module.manifest.author || "",
+    capabilities: module.manifest.capabilities || {},
+    supportedTypes: Array.isArray(module.manifest.supportedTypes)
+      ? module.manifest.supportedTypes
+      : [],
     remark: state.upstreams[module.manifest.id]?.remark || "",
     settingFields: Array.isArray(module.manifest.settingFields) ? module.manifest.settingFields : [],
     config: state.upstreams[module.manifest.id],
@@ -318,36 +326,17 @@ async function updatePanelSettings(settings = {}) {
     }
 
     const currentConfig = nextState.upstreams[targetUpstreamId] || module.normalizeSettings({});
-    const mergedConfig = {
-      ...currentConfig,
-      runtimeMode:
-        settings.runtimeMode === undefined ? currentConfig.runtimeMode : settings.runtimeMode,
-      trafficThresholdPercent:
-        settings.trafficThresholdPercent === undefined
-          ? currentConfig.trafficThresholdPercent
-          : settings.trafficThresholdPercent,
-      maxRegistrationAgeMinutes:
-        settings.maxRegistrationAgeMinutes === undefined
-          ? currentConfig.maxRegistrationAgeMinutes
-          : settings.maxRegistrationAgeMinutes,
-      subscriptionUpdateIntervalMinutes:
-        settings.subscriptionUpdateIntervalMinutes === undefined
-          ? currentConfig.subscriptionUpdateIntervalMinutes
-          : settings.subscriptionUpdateIntervalMinutes,
-      inviteCode:
-        settings.inviteCode === undefined ? currentConfig.inviteCode : settings.inviteCode,
-      name: settings.name === undefined ? currentConfig.name : settings.name,
-      remark: settings.remark === undefined ? currentConfig.remark : settings.remark,
-      settings: {
-        ...(currentConfig.settings || {}),
-        ...(settings.providerSettings && typeof settings.providerSettings === "object"
-          ? settings.providerSettings
-          : {}),
-      },
-      enabled: settings.enabled === undefined ? currentConfig.enabled : Boolean(settings.enabled),
-    };
-
-    nextState.upstreams[targetUpstreamId] = module.normalizeSettings(mergedConfig);
+    nextState.upstreams[targetUpstreamId] = module.applySettingsPatch(currentConfig, {
+      name: settings.name,
+      remark: settings.remark,
+      enabled: settings.enabled,
+      inviteCode: settings.inviteCode,
+      runtimeMode: settings.runtimeMode,
+      trafficThresholdPercent: settings.trafficThresholdPercent,
+      maxRegistrationAgeMinutes: settings.maxRegistrationAgeMinutes,
+      subscriptionUpdateIntervalMinutes: settings.subscriptionUpdateIntervalMinutes,
+      providerSettings: settings.providerSettings,
+    });
   }
 
   nextState.activeUpstreamId = resolveActiveUpstreamId(nextState.activeUpstreamId, nextState.upstreams);

@@ -29,7 +29,10 @@ const {
   listUserStates,
   loadRelayState,
 } = require("./registrationStore");
-const { reloadUpstreamModules } = require("./upstreams/core/registry");
+const {
+  listUpstreamModuleDiagnostics,
+  reloadUpstreamModules,
+} = require("./upstreams/core/registry");
 const { URL_TYPES } = require("./upstreams/shared/snailApi");
 const { manualRegister, resolveRelayState, resolveViewState } = require("./upstreams/service");
 
@@ -206,13 +209,17 @@ function createRandomNodeName() {
   return crypto.randomBytes(6).toString("hex");
 }
 
+function normalizeNodeNameForMatching(value) {
+  return value.normalize("NFKC").replace(/[。｡﹒．]/g, ".");
+}
+
 function isAdvertisementNodeName(value) {
-  const text = (value || "").toString().trim();
+  const text = normalizeNodeNameForMatching((value || "").toString().trim());
   if (!text) {
     return false;
   }
 
-  return /(?:https?:\/\/|www\.)?(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+(?:[a-z]{2,63}|xn--[a-z0-9-]{2,59})\b/i.test(
+  return /(?:https?:\/\/|www\.)?(?:[\p{L}\p{N}](?:[\p{L}\p{N}-]{0,61}[\p{L}\p{N}])?\.)+(?:[\p{L}]{2,63}|xn--[a-z0-9-]{2,59})\b/iu.test(
     text,
   );
 }
@@ -489,8 +496,23 @@ function buildUserSummary(user, userState) {
   };
 }
 
+function filterRelayUrlsBySupportedTypes(relayUrls, supportedTypes) {
+  if (!relayUrls || typeof relayUrls !== "object") {
+    return {};
+  }
+
+  const allowedTypes = Array.isArray(supportedTypes) && supportedTypes.length > 0
+    ? supportedTypes
+    : Object.keys(relayUrls);
+
+  return Object.fromEntries(
+    Object.entries(relayUrls).filter(([type]) => allowedTypes.includes(type)),
+  );
+}
+
 function shapeRegistrationResponse(user, upstream, userState, type, relayUrls, warning = "") {
-  const subscriptionUrl = type === "full" ? relayUrls.universal : relayUrls[type];
+  const filteredRelayUrls = filterRelayUrlsBySupportedTypes(relayUrls, upstream?.supportedTypes);
+  const subscriptionUrl = type === "full" ? filteredRelayUrls.universal : filteredRelayUrls[type];
 
   return {
     user: {
@@ -501,8 +523,14 @@ function shapeRegistrationResponse(user, upstream, userState, type, relayUrls, w
       ? {
           id: upstream.id,
           label: upstream.label,
+          apiVersion: upstream.apiVersion ?? null,
           moduleLabel: upstream.moduleLabel || "",
           description: upstream.description || "",
+          website: upstream.website || "",
+          docsUrl: upstream.docsUrl || "",
+          author: upstream.author || "",
+          capabilities: upstream.capabilities || {},
+          supportedTypes: upstream.supportedTypes || [],
           remark: upstream.remark || "",
           settingFields: Array.isArray(upstream.settingFields) ? upstream.settingFields : [],
           config: upstream.config || null,
@@ -515,7 +543,7 @@ function shapeRegistrationResponse(user, upstream, userState, type, relayUrls, w
     subscriptionUpdateIntervalMinutes: upstream?.config?.subscriptionUpdateIntervalMinutes ?? 30,
     type,
     subscriptionUrl,
-    relayUrls,
+    relayUrls: filteredRelayUrls,
     registration: sanitizeRegistration(userState.latestRegistration),
     usage: sanitizeUsage(userState.latestUsage),
     history: Array.isArray(userState.history)
@@ -806,11 +834,16 @@ async function handleUpdateSettings(request, response) {
 async function handleReloadUpstreams(response) {
   reloadUpstreamModules();
   const upstreams = await listUpstreamConfigs();
+  const diagnostics = listUpstreamModuleDiagnostics();
 
   sendJson(response, 200, {
     success: true,
-    message: "Upstream modules reloaded.",
+    message:
+      diagnostics.length > 0
+        ? `Upstream modules reloaded with ${diagnostics.length} issue(s).`
+        : "Upstream modules reloaded.",
     upstreams,
+    diagnostics,
   });
 }
 

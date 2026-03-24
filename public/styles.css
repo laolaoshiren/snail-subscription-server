@@ -416,7 +416,8 @@ small {
 }
 
 input,
-select {
+select,
+textarea {
   width: 100%;
   padding: 11px 13px;
   border-radius: 13px;
@@ -428,9 +429,15 @@ select {
 }
 
 input:focus,
-select:focus {
+select:focus,
+textarea:focus {
   border-color: rgba(245, 158, 11, 0.62);
   box-shadow: 0 0 0 4px rgba(245, 158, 11, 0.12);
+}
+
+textarea {
+  min-height: 110px;
+  resize: vertical;
 }
 
 .checkbox-row {
@@ -445,6 +452,10 @@ select:focus {
   width: 18px;
   height: 18px;
   margin: 0;
+}
+
+.provider-checkbox {
+  padding-top: 0;
 }
 
 .meta-grid,

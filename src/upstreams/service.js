@@ -156,6 +156,9 @@ async function queryCurrentUsage(upstreamId, record) {
   }
 
   const { module } = getUpstreamContext(upstreamId, upstreamConfig);
+  if (module.manifest?.capabilities?.supportsStatusQuery === false) {
+    return null;
+  }
   return module.query({
     record,
     upstreamConfig,

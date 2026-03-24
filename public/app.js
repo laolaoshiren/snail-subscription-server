@@ -41,6 +41,7 @@ const metaUpstreamSite = document.querySelector("#metaUpstreamSite");
 const activeUserLabel = document.querySelector("#activeUserLabel");
 const activeUpstreamLabel = document.querySelector("#activeUpstreamLabel");
 const modeDescription = document.querySelector("#modeDescription");
+const registerInviteCodeInput = document.querySelector("#inviteCode");
 
 const upstreamOverviewName = document.querySelector("#upstreamOverviewName");
 const upstreamOverviewModule = document.querySelector("#upstreamOverviewModule");
@@ -237,6 +238,11 @@ function getActiveUpstream() {
       label: "主上游",
       moduleLabel: "snail-default",
       description: "",
+      capabilities: {
+        supportsStatusQuery: true,
+        supportsInviteCode: true,
+      },
+      supportedTypes: Object.keys(protocolLabels),
       remark: "",
       active: true,
       config: {
@@ -300,9 +306,26 @@ function formatPercent(value) {
   return `${value.toFixed(2)}%`;
 }
 
+function upstreamSupportsStatusQuery(upstream) {
+  return upstream?.capabilities?.supportsStatusQuery !== false;
+}
+
+function upstreamSupportsInviteCode(upstream) {
+  return upstream?.capabilities?.supportsInviteCode !== false;
+}
+
+function getSupportedProtocolTypes(upstream) {
+  const supportedTypes = Array.isArray(upstream?.supportedTypes) ? upstream.supportedTypes : [];
+  return supportedTypes.length > 0 ? supportedTypes : Object.keys(protocolLabels);
+}
+
 function describeMode(upstream) {
   const config = upstream?.config || {};
   const updateIntervalText = `${config.subscriptionUpdateIntervalMinutes ?? 30} 分钟自动更新`;
+  if (!upstreamSupportsStatusQuery(upstream)) {
+    return `当前上游未实现状态查询接口，仅支持兼容模式；下游订阅按 ${updateIntervalText}。`;
+  }
+
   if (config.runtimeMode === "smart_usage") {
     const ageRule =
       Number(config.maxRegistrationAgeMinutes) > 0
@@ -327,7 +350,7 @@ function fillMeta(registration) {
   setText(metaUpstreamSite, registration?.upstreamSite || registration?.entryUrl || "暂无");
 }
 
-function renderLinks(relayUrls) {
+function renderLinks(relayUrls, upstream = getActiveUpstream()) {
   if (!linksList) {
     return;
   }
@@ -341,7 +364,8 @@ function renderLinks(relayUrls) {
 
   toggleHidden(emptyState, true);
 
-  Object.entries(protocolLabels).forEach(([type, label]) => {
+  getSupportedProtocolTypes(upstream).forEach((type) => {
+    const label = protocolLabels[type] || type;
     const url = relayUrls[type];
     const card = document.createElement("article");
     card.className = "link-card";
@@ -495,11 +519,110 @@ function renderHistory(history) {
 
 function renderUpstreamOverview(upstream) {
   const config = upstream?.config || {};
+  const capabilitySummary = [];
+  if (!upstreamSupportsStatusQuery(upstream)) {
+    capabilitySummary.push("仅兼容模式");
+  }
+  if (!upstreamSupportsInviteCode(upstream)) {
+    capabilitySummary.push("不支持邀请码");
+  }
+  if (Array.isArray(upstream?.supportedTypes) && upstream.supportedTypes.length > 0) {
+    capabilitySummary.push(`支持 ${upstream.supportedTypes.join(", ")}`);
+  }
   setText(upstreamOverviewName, upstream?.label || "主上游");
   setText(upstreamOverviewModule, upstream?.id || "snail-default");
   setText(upstreamOverviewStatus, config.enabled === false ? "已停用" : "启用中");
   setText(upstreamOverviewRemark, config.remark || upstream?.remark || "暂无备注");
-  setText(upstreamOverviewDescription, upstream?.description || "暂无说明");
+  setText(
+    upstreamOverviewDescription,
+    [upstream?.description || "暂无说明", capabilitySummary.join(" · ")].filter(Boolean).join(" · "),
+  );
+}
+
+function createProviderFieldControl(field, value) {
+  if (field.type === "textarea") {
+    const input = document.createElement("textarea");
+    input.name = `provider_${field.key}`;
+    input.dataset.providerKey = field.key;
+    input.placeholder = field.placeholder || "";
+    input.value = value ?? "";
+    input.rows = 4;
+    input.required = field.required === true;
+    return input;
+  }
+
+  if (field.type === "select") {
+    const input = document.createElement("select");
+    input.name = `provider_${field.key}`;
+    input.dataset.providerKey = field.key;
+    input.required = field.required === true;
+
+    if (!field.required) {
+      const emptyOption = document.createElement("option");
+      emptyOption.value = "";
+      emptyOption.textContent = field.placeholder || "请选择";
+      input.appendChild(emptyOption);
+    }
+
+    (Array.isArray(field.options) ? field.options : []).forEach((option) => {
+      const optionElement = document.createElement("option");
+      optionElement.value = option.value;
+      optionElement.textContent = option.label || option.value;
+      input.appendChild(optionElement);
+    });
+    input.value = value ?? "";
+    return input;
+  }
+
+  if (field.type === "checkbox") {
+    const wrapper = document.createElement("div");
+    wrapper.className = "checkbox-row provider-checkbox";
+    const input = document.createElement("input");
+    input.type = "checkbox";
+    input.name = `provider_${field.key}`;
+    input.dataset.providerKey = field.key;
+    input.checked = Boolean(value);
+    const text = document.createElement("span");
+    text.textContent = field.label || field.key;
+    wrapper.append(input, text);
+    return wrapper;
+  }
+
+  const input = document.createElement("input");
+  input.type = field.type === "password" ? "password" : field.type === "number" ? "number" : "text";
+  input.name = `provider_${field.key}`;
+  input.dataset.providerKey = field.key;
+  input.placeholder = field.placeholder || "";
+  input.value = value ?? "";
+  input.required = field.required === true;
+
+  if (field.type === "url") {
+    input.inputMode = "url";
+  }
+
+  if (field.type === "number") {
+    if (field.min !== null && field.min !== undefined) {
+      input.min = String(field.min);
+    }
+    if (field.max !== null && field.max !== undefined) {
+      input.max = String(field.max);
+    }
+    if (field.step !== null && field.step !== undefined) {
+      input.step = String(field.step);
+    }
+  }
+
+  return input;
+}
+
+function getProviderFieldValue(field, container) {
+  if (field.type === "checkbox") {
+    const checkbox = container?.querySelector("[data-provider-key]");
+    return Boolean(checkbox?.checked);
+  }
+
+  const input = container?.querySelector("[data-provider-key]");
+  return (input?.value || "").trim();
 }
 
 function renderProviderSettingsFields(upstream) {
@@ -514,21 +637,24 @@ function renderProviderSettingsFields(upstream) {
   fields.forEach((field) => {
     const label = document.createElement("label");
     label.className = "provider-field";
+    const hasEmbeddedLabel = field.type === "checkbox";
+    const value =
+      providerSettings[field.key] === undefined ? field.defaultValue : providerSettings[field.key];
 
-    const title = document.createElement("span");
-    title.textContent = field.label || field.key;
+    if (!hasEmbeddedLabel) {
+      const title = document.createElement("span");
+      title.textContent = field.label || field.key;
+      label.appendChild(title);
+    }
 
-    const input = document.createElement("input");
-    input.type = "text";
-    input.name = `provider_${field.key}`;
-    input.dataset.providerKey = field.key;
-    input.placeholder = field.placeholder || "";
-    input.value = providerSettings[field.key] || "";
+    label.appendChild(createProviderFieldControl(field, value));
 
-    const description = document.createElement("small");
-    description.textContent = field.description || "";
+    if (field.description) {
+      const description = document.createElement("small");
+      description.textContent = field.description || "";
+      label.appendChild(description);
+    }
 
-    label.append(title, input, description);
     providerSettingsFields.appendChild(label);
   });
 }
@@ -536,6 +662,8 @@ function renderProviderSettingsFields(upstream) {
 function syncUpstreamForm() {
   const upstream = getActiveUpstream();
   const config = upstream.config || {};
+  const supportsStatusQuery = upstreamSupportsStatusQuery(upstream);
+  const supportsInviteCode = upstreamSupportsInviteCode(upstream);
 
   setText(activeUpstreamLabel, upstream.label || "主上游");
   setText(modeDescription, describeMode(upstream));
@@ -549,9 +677,35 @@ function syncUpstreamForm() {
   setInputValue(maxRegistrationAgeInput, config.maxRegistrationAgeMinutes ?? 120);
   setInputValue(subscriptionUpdateIntervalInput, config.subscriptionUpdateIntervalMinutes ?? 30);
 
+  if (upstreamInviteCodeInput) {
+    upstreamInviteCodeInput.disabled = !supportsInviteCode;
+    upstreamInviteCodeInput.placeholder = supportsInviteCode ? "可选" : "当前上游不支持邀请码";
+  }
+  if (registerInviteCodeInput) {
+    registerInviteCodeInput.disabled = !supportsInviteCode;
+    registerInviteCodeInput.placeholder = supportsInviteCode
+      ? "可选，不填则使用当前上游默认邀请码"
+      : "当前上游不支持邀请码";
+  }
+
   const radio = upstreamForm?.querySelector(`input[name="runtimeMode"][value="${config.runtimeMode || "always_refresh"}"]`);
   if (radio) {
     radio.checked = true;
+  }
+
+  const smartUsageRadio = upstreamForm?.querySelector('input[name="runtimeMode"][value="smart_usage"]');
+  const alwaysRefreshRadio = upstreamForm?.querySelector('input[name="runtimeMode"][value="always_refresh"]');
+  if (smartUsageRadio) {
+    smartUsageRadio.disabled = !supportsStatusQuery;
+    if (!supportsStatusQuery && alwaysRefreshRadio) {
+      alwaysRefreshRadio.checked = true;
+    }
+  }
+  if (trafficThresholdInput) {
+    trafficThresholdInput.disabled = !supportsStatusQuery;
+  }
+  if (maxRegistrationAgeInput) {
+    maxRegistrationAgeInput.disabled = !supportsStatusQuery;
   }
 
   renderProviderSettingsFields(upstream);
@@ -712,7 +866,7 @@ function applyUserPayload(payload) {
   setText(modeDescription, describeMode(upstream));
 
   fillMeta(payload.registration);
-  renderLinks(payload.relayUrls || state.relayUrlsByUser[state.currentUserKey] || null);
+  renderLinks(payload.relayUrls || state.relayUrlsByUser[state.currentUserKey] || null, upstream);
   renderUsage(payload.usage);
   renderHistory(payload.history);
   updateSummaryFromPayload(payload);
@@ -798,7 +952,9 @@ if (registerForm) {
     setLoading(registerButton, "处理中...", true);
 
     const formData = new FormData(registerForm);
-    const inviteCode = (formData.get("inviteCode") || "").toString().trim();
+    const inviteCode = upstreamSupportsInviteCode(getActiveUpstream())
+      ? (formData.get("inviteCode") || "").toString().trim()
+      : "";
 
     try {
       const payload = await requestJson("/api/subscriptions", {
@@ -834,9 +990,16 @@ if (upstreamForm) {
     setLoading(saveUpstreamButton, "保存中...", true);
 
     const formData = new FormData(upstreamForm);
+    const upstream = getActiveUpstream();
     const providerSettings = {};
-    Array.from(providerSettingsFields?.querySelectorAll("[data-provider-key]") || []).forEach((input) => {
-      providerSettings[input.dataset.providerKey] = input.value.trim();
+    Array.from(upstream?.settingFields || []).forEach((field) => {
+      const element = providerSettingsFields?.querySelector(`[data-provider-key="${field.key}"]`);
+      const container = element?.closest(".provider-field");
+      if (!container) {
+        return;
+      }
+
+      providerSettings[field.key] = getProviderFieldValue(field, container);
     });
 
     try {
@@ -847,7 +1010,9 @@ if (upstreamForm) {
           name: (formData.get("name") || "").toString().trim(),
           remark: (formData.get("remark") || "").toString().trim(),
           enabled: upstreamEnabledInput?.checked,
-          inviteCode: (formData.get("inviteCode") || "").toString().trim(),
+          inviteCode: upstreamSupportsInviteCode(upstream)
+            ? (formData.get("inviteCode") || "").toString().trim()
+            : "",
           runtimeMode: (formData.get("runtimeMode") || "").toString(),
           trafficThresholdPercent: Number.parseInt(formData.get("trafficThresholdPercent"), 10),
           maxRegistrationAgeMinutes: Number.parseInt(formData.get("maxRegistrationAgeMinutes"), 10),
@@ -948,9 +1113,14 @@ if (reloadUpstreamsButton) {
     setLoading(reloadUpstreamsButton, "重载中...", true);
 
     try {
-      await requestJson("/api/upstreams/reload", { method: "POST" });
+      const payload = await requestJson("/api/upstreams/reload", { method: "POST" });
       await refreshSession();
-      setStatus("上游模块已重新加载。", "success");
+      setStatus(
+        Array.isArray(payload.diagnostics) && payload.diagnostics.length > 0
+          ? `上游模块已重载，但有 ${payload.diagnostics.length} 个模块未通过校验。`
+          : "上游模块已重新加载。",
+        Array.isArray(payload.diagnostics) && payload.diagnostics.length > 0 ? "warning" : "success",
+      );
     } catch (error) {
       if (error.status === 401) {
         showLogin();
