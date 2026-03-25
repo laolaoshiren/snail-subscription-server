@@ -1923,12 +1923,14 @@ if (testUpstreamButton) {
       });
 
       const typeCount = Array.isArray(payload.test?.supportedTypes) ? payload.test.supportedTypes.length : 0;
-      const summary = payload.test?.queryVerified
-        ? `测试通过：已完成注册并验证状态，支持 ${typeCount} 种订阅。`
-        : payload.test?.queryError
-          ? `注册可用，但状态查询失败：${payload.test.queryError}`
-          : `测试通过：已完成注册，支持 ${typeCount} 种订阅。`;
-      setStatus(summary, payload.test?.queryError ? "warning" : "success");
+      const summary = payload.test?.subscriptionError
+        ? `注册可用，但订阅校验失败：${payload.test.subscriptionError}`
+        : payload.test?.queryVerified
+          ? `测试通过：已完成注册、状态查询和 ${payload.test?.subscriptionType || "订阅"} 校验，支持 ${typeCount} 种订阅。`
+          : payload.test?.queryError
+            ? `注册和订阅可用，但状态查询失败：${payload.test.queryError}`
+            : `测试通过：已完成注册和 ${payload.test?.subscriptionType || "订阅"} 校验，支持 ${typeCount} 种订阅。`;
+      setStatus(summary, payload.test?.subscriptionError || payload.test?.queryError ? "warning" : "success");
     } catch (error) {
       if (error.status === 401) {
         showLogin();

@@ -6,6 +6,7 @@ const http = require("node:http");
 const path = require("node:path");
 const { URL } = require("node:url");
 const QRCode = require("qrcode");
+const yaml = require("js-yaml");
 
 const { ensureProxyConfigured } = require("./httpClient");
 const {
@@ -428,23 +429,72 @@ function sanitizeEncodedSubscriptionBody(rawBody) {
 }
 
 function sanitizeYamlSubscriptionBody(rawBody) {
-  const nameMap = new Map();
-  let result = rawBody
-    .replace(/(name:\s*)(['"])(.*?)\2/g, (match, prefix, quote, name) => {
-      const sanitizedName = getSanitizedNodeName(name, nameMap);
-      return `${prefix}${quote}${sanitizedName}${quote}`;
-    })
-    .replace(/(name:\s*)([^,'"\r\n}][^,\r\n}]*)/g, (match, prefix, name) => {
-      const sanitizedName = getSanitizedNodeName(name.trim(), nameMap);
-      return sanitizedName === name.trim() ? match : `${prefix}${sanitizedName}`;
+  try {
+    const parsed = yaml.load(rawBody);
+    if (!parsed || typeof parsed !== "object") {
+      return rawBody;
+    }
+
+    const nameMap = new Map();
+    const directNameKeys = new Set(["name"]);
+    const referenceArrayKeys = new Set(["proxies"]);
+
+    function visit(value, parentKey = "") {
+      if (Array.isArray(value)) {
+        return value.map((item) =>
+          typeof item === "string" && referenceArrayKeys.has(parentKey)
+            ? getSanitizedNodeName(item, nameMap)
+            : visit(item, parentKey),
+        );
+      }
+
+      if (!value || typeof value !== "object") {
+        return value;
+      }
+
+      return Object.fromEntries(
+        Object.entries(value).map(([key, entryValue]) => {
+          if (typeof entryValue === "string" && directNameKeys.has(key)) {
+            return [key, getSanitizedNodeName(entryValue, nameMap)];
+          }
+
+          if (Array.isArray(entryValue) && referenceArrayKeys.has(key)) {
+            return [
+              key,
+              entryValue.map((item) =>
+                typeof item === "string" ? getSanitizedNodeName(item, nameMap) : visit(item, key),
+              ),
+            ];
+          }
+
+          return [key, visit(entryValue, key)];
+        }),
+      );
+    }
+
+    return yaml.dump(visit(parsed), {
+      noRefs: true,
+      lineWidth: -1,
     });
+  } catch (error) {
+    const nameMap = new Map();
+    let result = rawBody
+      .replace(/(name:\s*)(['"])(.*?)\2/g, (match, prefix, quote, name) => {
+        const sanitizedName = getSanitizedNodeName(name, nameMap);
+        return `${prefix}${quote}${sanitizedName}${quote}`;
+      })
+      .replace(/(name:\s*)([^,'"\r\n}][^,\r\n}]*)/g, (match, prefix, name) => {
+        const sanitizedName = getSanitizedNodeName(name.trim(), nameMap);
+        return sanitizedName === name.trim() ? match : `${prefix}${sanitizedName}`;
+      });
 
-  for (const [sourceName, targetName] of nameMap.entries()) {
-    const quotedPattern = new RegExp(`(['"])${escapeRegExp(sourceName)}\\1`, "g");
-    result = result.replace(quotedPattern, (match, quote) => `${quote}${targetName}${quote}`);
+    for (const [sourceName, targetName] of nameMap.entries()) {
+      const quotedPattern = new RegExp(`(['"])${escapeRegExp(sourceName)}\\1`, "g");
+      result = result.replace(quotedPattern, (match, quote) => `${quote}${targetName}${quote}`);
+    }
+
+    return result;
   }
-
-  return result;
 }
 
 function sanitizeSubscriptionBody(bodyBuffer) {
@@ -1095,6 +1145,101 @@ function getContentTypeByRelayType(type, fallback = "text/plain; charset=utf-8")
   return fallback;
 }
 
+function validateSubscriptionPayload(type, bodyBuffer) {
+  const rawBody = Buffer.isBuffer(bodyBuffer) ? bodyBuffer.toString("utf8") : "";
+  const trimmedBody = rawBody.trim();
+  if (!trimmedBody) {
+    throw new Error("Subscription returned an empty body.");
+  }
+
+  if (type === "clash") {
+    const parsed = yaml.load(trimmedBody);
+    if (!parsed || typeof parsed !== "object") {
+      throw new Error("Clash subscription did not return a YAML object.");
+    }
+
+    const proxyNames = new Set(
+      (Array.isArray(parsed.proxies) ? parsed.proxies : [])
+        .map((proxy) => (proxy && typeof proxy === "object" ? proxy.name : ""))
+        .filter(Boolean),
+    );
+    const groupNames = new Set(
+      (Array.isArray(parsed["proxy-groups"]) ? parsed["proxy-groups"] : [])
+        .map((group) => (group && typeof group === "object" ? group.name : ""))
+        .filter(Boolean),
+    );
+    const builtinTargets = new Set(["DIRECT", "REJECT", "GLOBAL"]);
+
+    (Array.isArray(parsed["proxy-groups"]) ? parsed["proxy-groups"] : []).forEach((group) => {
+      if (!group || typeof group !== "object" || !Array.isArray(group.proxies)) {
+        return;
+      }
+
+      group.proxies.forEach((target) => {
+        if (
+          typeof target === "string"
+          && !proxyNames.has(target)
+          && !groupNames.has(target)
+          && !builtinTargets.has(target)
+        ) {
+          throw new Error(`Clash proxy group "${group.name || "unnamed"}" references an unknown target: ${target}`);
+        }
+      });
+    });
+    return;
+  }
+
+  if (type === "sing-box") {
+    const parsed = JSON.parse(trimmedBody);
+    if (!parsed || typeof parsed !== "object") {
+      throw new Error("Sing-box subscription did not return a JSON object.");
+    }
+    return;
+  }
+
+  if (type === "universal") {
+    const decoded = tryDecodeBase64(trimmedBody);
+    if (decoded && /:\/\//.test(decoded)) {
+      return;
+    }
+
+    if (!/:\/\//.test(trimmedBody)) {
+      throw new Error("Universal subscription did not contain a valid node list.");
+    }
+  }
+}
+
+async function probeUpstreamSubscription(record, supportedTypes = []) {
+  const availableTypes = Array.isArray(supportedTypes) && supportedTypes.length > 0
+    ? supportedTypes.filter((type) => record?.clientUrls?.[type])
+    : RELAY_TYPES.filter((type) => record?.clientUrls?.[type]);
+  const preferredTypes = ["clash", "universal", "sing-box", ...availableTypes];
+  const probeType = preferredTypes.find((type, index) =>
+    record?.clientUrls?.[type] && preferredTypes.indexOf(type) === index) || "";
+
+  if (!probeType) {
+    return {
+      verified: false,
+      type: "",
+      error: "No subscription URL is available for testing.",
+    };
+  }
+
+  const response = await fetchUpstreamSubscription(record.clientUrls[probeType]);
+  if (!response.ok) {
+    throw new Error(`Subscription request failed with status ${response.status}.`);
+  }
+
+  const sanitizedBody = sanitizeSubscriptionBody(Buffer.from(await response.arrayBuffer()));
+  validateSubscriptionPayload(probeType, sanitizedBody);
+
+  return {
+    verified: true,
+    type: probeType,
+    error: "",
+  };
+}
+
 async function fetchResolvedSubscriptionSource(source, type, requestMethod = "GET") {
   const latest = source?.userState?.latestRegistration;
   if (!latest) {
@@ -1166,6 +1311,10 @@ async function fetchResolvedSubscriptionSource(source, type, requestMethod = "GE
     requestMethod === "HEAD"
       ? Buffer.alloc(0)
       : sanitizeSubscriptionBody(Buffer.from(await upstreamResponse.arrayBuffer()));
+
+  if (requestMethod !== "HEAD") {
+    validateSubscriptionPayload(type, body);
+  }
 
   return {
     headers,
@@ -1435,9 +1584,22 @@ async function handleTestUpstream(request, response) {
     }
   }
 
+  let subscriptionTest = null;
+  let subscriptionError = "";
+  try {
+    subscriptionTest = await probeUpstreamSubscription(
+      record,
+      Array.isArray(module.manifest?.supportedTypes) ? module.manifest.supportedTypes : [],
+    );
+  } catch (error) {
+    subscriptionError = error.message;
+  }
+
   sendJson(response, 200, {
     success: true,
-    message: queryError
+    message: subscriptionError
+      ? `Upstream registration succeeded, but subscription verification failed: ${subscriptionError}`
+      : queryError
       ? `Upstream registration succeeded, but status query failed: ${queryError}`
       : "Upstream test succeeded.",
     test: {
@@ -1450,6 +1612,9 @@ async function handleTestUpstream(request, response) {
       },
       queryVerified: Boolean(usage),
       queryError,
+      subscriptionVerified: Boolean(subscriptionTest?.verified),
+      subscriptionType: subscriptionTest?.type || "",
+      subscriptionError,
     },
   });
 }
@@ -1793,6 +1958,7 @@ async function proxySubscription(response, request, type, url) {
         },
       ),
     );
+    validateSubscriptionPayload(type, mergedBody);
     response.end(mergedBody);
     return;
   }
