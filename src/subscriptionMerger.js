@@ -126,11 +126,32 @@ const MAIN_SELECTOR_GROUP_NAME = "\ud83d\udd30 \u8282\u70b9\u9009\u62e9";
 const AUTO_SELECT_GROUP_NAME = "\u267b\ufe0f \u81ea\u52a8\u9009\u62e9";
 const DIRECT_GROUP_NAME = "\ud83c\udfaf \u5168\u7403\u76f4\u8fde";
 const FALLBACK_GROUP_NAME = "\u2699\ufe0f \u6545\u969c\u8f6c\u79fb";
-const HONG_KONG_LOAD_BALANCE_GROUP_NAME = "\ud83c\udded\ud83c\uddf0 \u9999\u6e2f\u8d1f\u8f7d\u5747\u8861";
 const TOP_PRIORITY_GROUP_NAMES = [
   MAIN_SELECTOR_GROUP_NAME,
   AUTO_SELECT_GROUP_NAME,
   FALLBACK_GROUP_NAME,
+];
+const AGGREGATE_LOAD_BALANCE_GROUP_DEFINITIONS = [
+  {
+    key: "hong-kong",
+    name: "\ud83c\udded\ud83c\uddf0 \u9999\u6e2f\u8d1f\u8f7d\u5747\u8861",
+  },
+  {
+    key: "japan",
+    name: "\ud83c\uddef\ud83c\uddf5 \u65e5\u672c\u8d1f\u8f7d\u5747\u8861",
+  },
+  {
+    key: "united-states",
+    name: "\ud83c\uddfa\ud83c\uddf8 \u7f8e\u56fd\u8d1f\u8f7d\u5747\u8861",
+  },
+  {
+    key: "singapore",
+    name: "\ud83c\uddf8\ud83c\uddec \u65b0\u52a0\u5761\u8d1f\u8f7d\u5747\u8861",
+  },
+  {
+    key: "south-korea",
+    name: "\ud83c\uddf0\ud83c\uddf7 \u97e9\u56fd\u8d1f\u8f7d\u5747\u8861",
+  },
 ];
 const CLASH_COUNTRY_GROUP_DEFINITIONS = [
   {
@@ -322,6 +343,19 @@ function setAggregateCountryGroup(proxy, countryGroupKey) {
   });
 }
 
+function setAggregateGeneratedGroupKey(group, countryGroupKey) {
+  if (!group || typeof group !== "object" || !countryGroupKey) {
+    return;
+  }
+
+  Object.defineProperty(group, "__aggregateCountryGroup", {
+    configurable: true,
+    enumerable: false,
+    value: countryGroupKey,
+    writable: true,
+  });
+}
+
 function buildAggregateCountryGroups(proxies) {
   return CLASH_COUNTRY_GROUP_DEFINITIONS.map((definition) => {
     const matchingProxyNames = proxies
@@ -333,7 +367,7 @@ function buildAggregateCountryGroups(proxies) {
       return null;
     }
 
-    return {
+    const group = {
       name: definition.name,
       type: "url-test",
       url: AGGREGATE_HEALTHCHECK_URL,
@@ -343,31 +377,71 @@ function buildAggregateCountryGroups(proxies) {
       tolerance: 50,
       proxies: collectUniqueValues(matchingProxyNames),
     };
+
+    setAggregateGeneratedGroupKey(group, definition.key);
+    return group;
   }).filter(Boolean);
 }
 
 function buildAggregateRegionalLoadBalanceGroups(proxies) {
-  const hongKongProxyNames = proxies
-    .filter((proxy) => proxy?.__aggregateCountryGroup === "hong-kong")
-    .map((proxy) => proxy?.name)
-    .filter(Boolean);
+  return AGGREGATE_LOAD_BALANCE_GROUP_DEFINITIONS.map((definition) => {
+    const matchingProxyNames = proxies
+      .filter((proxy) => proxy?.__aggregateCountryGroup === definition.key)
+      .map((proxy) => proxy?.name)
+      .filter(Boolean);
 
-  if (hongKongProxyNames.length < 2) {
-    return [];
-  }
+    if (matchingProxyNames.length < 2) {
+      return null;
+    }
 
-  return [
-    {
-      name: HONG_KONG_LOAD_BALANCE_GROUP_NAME,
+    const group = {
+      name: definition.name,
       type: "load-balance",
       url: AGGREGATE_HEALTHCHECK_URL,
       interval: AGGREGATE_HEALTHCHECK_INTERVAL_SECONDS,
       lazy: false,
       timeout: AGGREGATE_HEALTHCHECK_TIMEOUT_MS,
       strategy: "consistent-hashing",
-      proxies: collectUniqueValues(hongKongProxyNames),
-    },
-  ];
+      proxies: collectUniqueValues(matchingProxyNames),
+    };
+
+    setAggregateGeneratedGroupKey(group, definition.key);
+    return group;
+  }).filter(Boolean);
+}
+
+function buildAggregateGeneratedSelectorGroups(countryGroups, loadBalanceGroups) {
+  const loadBalanceByCountryKey = new Map(
+    loadBalanceGroups
+      .map((group) => [group?.__aggregateCountryGroup, group])
+      .filter(([key, group]) => key && group),
+  );
+  const orderedGroups = [];
+  const addedNames = new Set();
+
+  countryGroups.forEach((countryGroup) => {
+    const countryKey = countryGroup?.__aggregateCountryGroup;
+    const loadBalanceGroup = loadBalanceByCountryKey.get(countryKey);
+
+    if (loadBalanceGroup && !addedNames.has(loadBalanceGroup.name)) {
+      orderedGroups.push(loadBalanceGroup);
+      addedNames.add(loadBalanceGroup.name);
+    }
+
+    if (countryGroup?.name && !addedNames.has(countryGroup.name)) {
+      orderedGroups.push(countryGroup);
+      addedNames.add(countryGroup.name);
+    }
+  });
+
+  loadBalanceGroups.forEach((group) => {
+    if (group?.name && !addedNames.has(group.name)) {
+      orderedGroups.push(group);
+      addedNames.add(group.name);
+    }
+  });
+
+  return orderedGroups;
 }
 
 function prioritizeValues(values, priorityValues, additions = []) {
@@ -500,7 +574,10 @@ function mergeClashTemplate(template, proxies) {
   const mergedProxyNames = proxies.map((proxy) => proxy.name).filter(Boolean);
   const countryGroups = buildAggregateCountryGroups(proxies);
   const regionalLoadBalanceGroups = buildAggregateRegionalLoadBalanceGroups(proxies);
-  const generatedSelectorGroups = [...regionalLoadBalanceGroups, ...countryGroups];
+  const generatedSelectorGroups = buildAggregateGeneratedSelectorGroups(
+    countryGroups,
+    regionalLoadBalanceGroups,
+  );
   const generatedSelectorGroupNames = generatedSelectorGroups.map((group) => group.name).filter(Boolean);
 
   nextTemplate.proxies = proxies;
