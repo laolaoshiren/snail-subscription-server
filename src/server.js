@@ -275,6 +275,103 @@ function getSanitizedNodeName(name, nameMap) {
   return nameMap.get(name);
 }
 
+function splitClashRuleSegments(rule) {
+  const segments = [];
+  let current = "";
+  let quote = "";
+  let parenthesesDepth = 0;
+  let bracketDepth = 0;
+
+  for (const character of String(rule || "")) {
+    if (quote) {
+      current += character;
+      if (character === quote) {
+        quote = "";
+      }
+      continue;
+    }
+
+    if (character === "'" || character === "\"") {
+      quote = character;
+      current += character;
+      continue;
+    }
+
+    if (character === "(") {
+      parenthesesDepth += 1;
+      current += character;
+      continue;
+    }
+
+    if (character === ")") {
+      parenthesesDepth = Math.max(0, parenthesesDepth - 1);
+      current += character;
+      continue;
+    }
+
+    if (character === "[") {
+      bracketDepth += 1;
+      current += character;
+      continue;
+    }
+
+    if (character === "]") {
+      bracketDepth = Math.max(0, bracketDepth - 1);
+      current += character;
+      continue;
+    }
+
+    if (character === "," && parenthesesDepth === 0 && bracketDepth === 0) {
+      segments.push(current.trim());
+      current = "";
+      continue;
+    }
+
+    current += character;
+  }
+
+  segments.push(current.trim());
+  return segments;
+}
+
+function getClashRuleTargetIndex(rule) {
+  const segments = splitClashRuleSegments(rule);
+  if (segments.length === 0) {
+    return -1;
+  }
+
+  const ruleType = segments[0].toUpperCase();
+  if (ruleType === "MATCH" || ruleType === "FINAL") {
+    return segments.length >= 2 ? 1 : -1;
+  }
+
+  if (ruleType === "AND" || ruleType === "OR" || ruleType === "NOT") {
+    return segments.length >= 2 ? segments.length - 1 : -1;
+  }
+
+  return segments.length >= 3 ? 2 : -1;
+}
+
+function sanitizeClashRule(rule, nameMap) {
+  if (typeof rule !== "string" || nameMap.size === 0) {
+    return rule;
+  }
+
+  const segments = splitClashRuleSegments(rule);
+  const targetIndex = getClashRuleTargetIndex(rule);
+  if (targetIndex < 0 || targetIndex >= segments.length) {
+    return rule;
+  }
+
+  const target = segments[targetIndex];
+  if (!nameMap.has(target)) {
+    return rule;
+  }
+
+  segments[targetIndex] = nameMap.get(target);
+  return segments.join(",");
+}
+
 function sanitizeJsonSubscriptionBody(rawBody) {
   const nameMap = new Map();
   const directNameKeys = new Set(["tag", "name", "ps", "remarks"]);
@@ -441,6 +538,10 @@ function sanitizeYamlSubscriptionBody(rawBody) {
 
     function visit(value, parentKey = "") {
       if (Array.isArray(value)) {
+        if (parentKey === "rules") {
+          return value.map((item) => sanitizeClashRule(item, nameMap));
+        }
+
         return value.map((item) =>
           typeof item === "string" && referenceArrayKeys.has(parentKey)
             ? getSanitizedNodeName(item, nameMap)
@@ -491,6 +592,13 @@ function sanitizeYamlSubscriptionBody(rawBody) {
     for (const [sourceName, targetName] of nameMap.entries()) {
       const quotedPattern = new RegExp(`(['"])${escapeRegExp(sourceName)}\\1`, "g");
       result = result.replace(quotedPattern, (match, quote) => `${quote}${targetName}${quote}`);
+    }
+
+    if (nameMap.size > 0) {
+      result = result.replace(/(^\s*-\s*)(.+)$/gm, (match, prefix, content) => {
+        const sanitizedRule = sanitizeClashRule(content, nameMap);
+        return sanitizedRule === content ? match : `${prefix}${sanitizedRule}`;
+      });
     }
 
     return result;
@@ -1717,6 +1825,29 @@ function validateSubscriptionPayload(type, bodyBuffer) {
           throw new Error(`Clash proxy group "${group.name || "unnamed"}" references an unknown target: ${target}`);
         }
       });
+    });
+
+    (Array.isArray(parsed.rules) ? parsed.rules : []).forEach((rule) => {
+      if (typeof rule !== "string") {
+        return;
+      }
+
+      const segments = splitClashRuleSegments(rule);
+      const targetIndex = getClashRuleTargetIndex(rule);
+      if (targetIndex < 0 || targetIndex >= segments.length) {
+        return;
+      }
+
+      const target = segments[targetIndex];
+      if (
+        target
+        && !proxyNames.has(target)
+        && !groupNames.has(target)
+        && !builtinTargets.has(target)
+        && !target.startsWith("[]")
+      ) {
+        throw new Error(`Clash rule references an unknown target: ${target}`);
+      }
     });
     return;
   }
