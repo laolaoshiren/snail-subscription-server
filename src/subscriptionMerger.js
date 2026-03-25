@@ -124,6 +124,7 @@ const AGGREGATE_HEALTHCHECK_INTERVAL_SECONDS = 30;
 const AGGREGATE_HEALTHCHECK_TIMEOUT_MS = 5000;
 const MAIN_SELECTOR_GROUP_NAME = "\ud83d\udd30 \u8282\u70b9\u9009\u62e9";
 const AUTO_SELECT_GROUP_NAME = "\u267b\ufe0f \u81ea\u52a8\u9009\u62e9";
+const DIRECT_GROUP_NAME = "\ud83c\udfaf \u5168\u7403\u76f4\u8fde";
 const FALLBACK_GROUP_NAME = "\u2699\ufe0f \u6545\u969c\u8f6c\u79fb";
 const TOP_PRIORITY_GROUP_NAMES = [
   MAIN_SELECTOR_GROUP_NAME,
@@ -389,7 +390,7 @@ function shouldInjectCountryGroupsIntoSelector(group) {
     && typeof group === "object"
     && group.type === "select"
     && Array.isArray(group.proxies)
-    && group.proxies.includes(MAIN_SELECTOR_GROUP_NAME),
+    && (group.name === MAIN_SELECTOR_GROUP_NAME || group.proxies.includes(MAIN_SELECTOR_GROUP_NAME)),
   );
 }
 
@@ -447,6 +448,10 @@ function mergeClashTemplate(template, proxies) {
 
       const shouldInjectCountryGroups =
         countryGroupNames.length > 0 && shouldInjectCountryGroupsIntoSelector(group);
+      const selectorPriorityNames =
+        group.name === MAIN_SELECTOR_GROUP_NAME
+          ? [AUTO_SELECT_GROUP_NAME, DIRECT_GROUP_NAME, FALLBACK_GROUP_NAME]
+          : [MAIN_SELECTOR_GROUP_NAME, AUTO_SELECT_GROUP_NAME, DIRECT_GROUP_NAME, FALLBACK_GROUP_NAME];
 
       if (!group.proxies.some((value) => templateProxyNameSet.has(value))) {
         if (shouldInjectCountryGroups) {
@@ -454,7 +459,7 @@ function mergeClashTemplate(template, proxies) {
             ...cloneSerializable(group),
             proxies: prioritizeValues(
               group.proxies,
-              TOP_PRIORITY_GROUP_NAMES,
+              selectorPriorityNames,
               countryGroupNames,
             ),
           });
@@ -468,7 +473,7 @@ function mergeClashTemplate(template, proxies) {
         proxies: shouldInjectCountryGroups
           ? prioritizeValues(
               replaceTemplateProxyNames(group.proxies, templateProxyNameSet, mergedProxyNames),
-              TOP_PRIORITY_GROUP_NAMES,
+              selectorPriorityNames,
               countryGroupNames,
             )
           : replaceTemplateProxyNames(group.proxies, templateProxyNameSet, mergedProxyNames),
