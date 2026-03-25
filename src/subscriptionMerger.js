@@ -125,16 +125,11 @@ const AGGREGATE_HEALTHCHECK_TIMEOUT_MS = 5000;
 const MAIN_SELECTOR_GROUP_NAME = "\ud83d\udd30 \u8282\u70b9\u9009\u62e9";
 const AUTO_SELECT_GROUP_NAME = "\u267b\ufe0f \u81ea\u52a8\u9009\u62e9";
 const FALLBACK_GROUP_NAME = "\u2699\ufe0f \u6545\u969c\u8f6c\u79fb";
-const COUNTRY_GROUP_SELECTOR_ANCHOR_NAMES = new Set([
+const TOP_PRIORITY_GROUP_NAMES = [
   MAIN_SELECTOR_GROUP_NAME,
   AUTO_SELECT_GROUP_NAME,
   FALLBACK_GROUP_NAME,
-]);
-const COUNTRY_GROUP_INSERT_AFTER_NAMES = new Set([
-  MAIN_SELECTOR_GROUP_NAME,
-  AUTO_SELECT_GROUP_NAME,
-  FALLBACK_GROUP_NAME,
-]);
+];
 const CLASH_COUNTRY_GROUP_DEFINITIONS = [
   {
     key: "hong-kong",
@@ -311,32 +306,19 @@ function buildAggregateCountryGroups(proxies) {
   }).filter(Boolean);
 }
 
-function insertAfterLastAnchor(values, additions, anchorValues) {
-  const nextValues = Array.isArray(values) ? values.slice() : [];
+function prioritizeValues(values, priorityValues, additions = []) {
+  const nextValues = collectUniqueValues(Array.isArray(values) ? values : []).filter(Boolean);
+  const uniquePriorityValues = collectUniqueValues(priorityValues).filter((value) => nextValues.includes(value));
   const uniqueAdditions = collectUniqueValues(additions).filter(Boolean);
 
-  if (uniqueAdditions.length === 0) {
-    return collectUniqueValues(nextValues);
+  if (uniquePriorityValues.length === 0 && uniqueAdditions.length === 0) {
+    return nextValues;
   }
 
-  const filteredValues = nextValues.filter((value) => !uniqueAdditions.includes(value));
-  let insertionIndex = -1;
-
-  filteredValues.forEach((value, index) => {
-    if (anchorValues.has(value)) {
-      insertionIndex = index;
-    }
-  });
-
-  if (insertionIndex === -1) {
-    return collectUniqueValues([...uniqueAdditions, ...filteredValues]);
-  }
-
-  return collectUniqueValues([
-    ...filteredValues.slice(0, insertionIndex + 1),
-    ...uniqueAdditions,
-    ...filteredValues.slice(insertionIndex + 1),
-  ]);
+  const remaining = nextValues.filter(
+    (value) => !uniquePriorityValues.includes(value) && !uniqueAdditions.includes(value),
+  );
+  return collectUniqueValues([...uniquePriorityValues, ...uniqueAdditions, ...remaining]);
 }
 
 function tuneAggregateHealthCheckGroup(group) {
@@ -356,7 +338,7 @@ function tuneAggregateHealthCheckGroup(group) {
   };
 }
 
-function insertAggregateCountryGroups(groups, countryGroups) {
+function prioritizeAggregateCountryGroups(groups, countryGroups) {
   if (!Array.isArray(groups) || countryGroups.length === 0) {
     return Array.isArray(groups) ? groups : [];
   }
@@ -372,22 +354,33 @@ function insertAggregateCountryGroups(groups, countryGroups) {
     return groups;
   }
 
-  let insertionIndex = -1;
-  groups.forEach((group, index) => {
-    if (COUNTRY_GROUP_INSERT_AFTER_NAMES.has(group?.name)) {
-      insertionIndex = index;
+  const countryGroupNameSet = new Set(uniqueCountryGroups.map((group) => group.name).filter(Boolean));
+  const groupByName = new Map();
+
+  groups.forEach((group) => {
+    if (!group || typeof group !== "object" || !group.name || groupByName.has(group.name)) {
+      return;
+    }
+
+    groupByName.set(group.name, group);
+  });
+
+  uniqueCountryGroups.forEach((group) => {
+    if (group?.name && !groupByName.has(group.name)) {
+      groupByName.set(group.name, group);
     }
   });
 
-  if (insertionIndex === -1) {
-    return [...uniqueCountryGroups, ...groups];
-  }
+  const topGroupNames = [...TOP_PRIORITY_GROUP_NAMES, ...uniqueCountryGroups.map((group) => group.name)];
+  const prioritizedNames = topGroupNames.filter((name) => groupByName.has(name));
+  const prioritizedNameSet = new Set(prioritizedNames);
+  const prioritizedGroups = prioritizedNames.map((name) => groupByName.get(name)).filter(Boolean);
+  const remainingGroups = groups.filter((group) => {
+    const groupName = group && typeof group === "object" ? group.name : "";
+    return !groupName || (!prioritizedNameSet.has(groupName) && !countryGroupNameSet.has(groupName));
+  });
 
-  return [
-    ...groups.slice(0, insertionIndex + 1),
-    ...uniqueCountryGroups,
-    ...groups.slice(insertionIndex + 1),
-  ];
+  return [...prioritizedGroups, ...remainingGroups];
 }
 
 function shouldInjectCountryGroupsIntoSelector(group) {
@@ -459,10 +452,10 @@ function mergeClashTemplate(template, proxies) {
         if (shouldInjectCountryGroups) {
           return tuneAggregateHealthCheckGroup({
             ...cloneSerializable(group),
-            proxies: insertAfterLastAnchor(
+            proxies: prioritizeValues(
               group.proxies,
+              TOP_PRIORITY_GROUP_NAMES,
               countryGroupNames,
-              COUNTRY_GROUP_SELECTOR_ANCHOR_NAMES,
             ),
           });
         }
@@ -473,16 +466,16 @@ function mergeClashTemplate(template, proxies) {
       return {
         ...tuneAggregateHealthCheckGroup(group),
         proxies: shouldInjectCountryGroups
-          ? insertAfterLastAnchor(
+          ? prioritizeValues(
               replaceTemplateProxyNames(group.proxies, templateProxyNameSet, mergedProxyNames),
+              TOP_PRIORITY_GROUP_NAMES,
               countryGroupNames,
-              COUNTRY_GROUP_SELECTOR_ANCHOR_NAMES,
             )
           : replaceTemplateProxyNames(group.proxies, templateProxyNameSet, mergedProxyNames),
       };
     });
 
-    nextProxyGroups = insertAggregateCountryGroups(nextProxyGroups, countryGroups);
+    nextProxyGroups = prioritizeAggregateCountryGroups(nextProxyGroups, countryGroups);
     nextTemplate["proxy-groups"] = nextProxyGroups;
   }
 
