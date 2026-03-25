@@ -73,6 +73,7 @@ const sessions = new Map();
 
 const RELAY_TYPES = Object.keys(URL_TYPES);
 const SUPPORTED_TYPES = new Set(["full", ...RELAY_TYPES]);
+const AGGREGATE_STORAGE_DELIMITER = "::";
 const FORWARDED_HEADERS = new Set([
   "cache-control",
   "content-disposition",
@@ -1462,6 +1463,78 @@ function getUpstreamSummary(upstreams, upstreamId) {
   return upstreams.find((item) => item.id === upstreamId) || upstreams[0] || null;
 }
 
+function buildAggregateStorageKey(upstreamId, instanceNumber = 1) {
+  const normalizedInstanceNumber = Number.parseInt(instanceNumber, 10);
+  if (!Number.isFinite(normalizedInstanceNumber) || normalizedInstanceNumber <= 1) {
+    return upstreamId;
+  }
+
+  return `${upstreamId}${AGGREGATE_STORAGE_DELIMITER}${normalizedInstanceNumber}`;
+}
+
+function createEmptyViewUserState() {
+  return {
+    latestRegistration: null,
+    latestUsage: null,
+    history: [],
+    updatedAt: null,
+  };
+}
+
+function getOrderedRuntimeUpstreams(runtime, upstreams) {
+  const upstreamMap = new Map(
+    (Array.isArray(upstreams) ? upstreams : [])
+      .filter((upstream) => upstream?.id)
+      .map((upstream) => [upstream.id, upstream]),
+  );
+  const orderedIds =
+    Array.isArray(runtime?.upstreamOrder) && runtime.upstreamOrder.length > 0
+      ? runtime.upstreamOrder.filter((upstreamId) => upstreamMap.has(upstreamId))
+      : Array.from(upstreamMap.keys());
+
+  return orderedIds.map((upstreamId) => upstreamMap.get(upstreamId)).filter(Boolean);
+}
+
+function buildLocalAggregateTargets(relayState, userKey, runtime, upstreams) {
+  const counts =
+    runtime?.upstreamAggregation?.counts && typeof runtime.upstreamAggregation.counts === "object"
+      ? runtime.upstreamAggregation.counts
+      : {};
+  const userUpstreams =
+    relayState?.users?.[userKey]?.upstreams && typeof relayState.users[userKey].upstreams === "object"
+      ? relayState.users[userKey].upstreams
+      : {};
+
+  return getOrderedRuntimeUpstreams(runtime, upstreams).flatMap((upstream) => {
+    if (upstream?.config?.enabled === false) {
+      return [];
+    }
+
+    const rawCopies = Number.parseInt(counts[upstream.id], 10);
+    const copies = Number.isFinite(rawCopies) && rawCopies > 0 ? rawCopies : 0;
+    if (copies <= 0) {
+      return [];
+    }
+
+    const baseLabel = upstream.label || upstream.id;
+    return Array.from({ length: copies }, (_, index) => {
+      const instanceNumber = index + 1;
+      const storageKey = buildAggregateStorageKey(upstream.id, instanceNumber);
+      return {
+        upstreamId: upstream.id,
+        storageKey,
+        instanceNumber,
+        instanceLabel: copies > 1 ? `${baseLabel} #${instanceNumber}` : baseLabel,
+        upstreamConfig: upstream.config || null,
+        userState:
+          userUpstreams[storageKey] && typeof userUpstreams[storageKey] === "object"
+            ? userUpstreams[storageKey]
+            : createEmptyViewUserState(),
+      };
+    });
+  });
+}
+
 function formatAggregateSelectionLabel(targets = []) {
   const counts = new Map();
   const labels = new Map();
@@ -2021,6 +2094,36 @@ async function buildAggregateResponse(request, userKey, type, targets, failures 
   };
 }
 
+async function buildCachedViewResponse(request, userKey, type, runtime, upstreamId) {
+  const relayToken = await getRelayToken(userKey);
+  const relayUrls = buildRelayUrls(await getRequestOrigin(request), relayToken);
+  const upstreams = await listUpstreamConfigs();
+  const user = RELAY_USERS.find((item) => item.key === userKey) || RELAY_USERS[0];
+
+  if (runtime.activeUpstreamMode === ACTIVE_UPSTREAM_MODES.AGGREGATE && !upstreamId) {
+    const relayState = await loadRelayState();
+    const targets = buildLocalAggregateTargets(relayState, userKey, runtime, upstreams);
+
+    return {
+      message: targets.some((target) => target?.userState?.latestRegistration)
+        ? "Cached aggregate user state returned."
+        : "Current aggregate has no cached registration yet.",
+      payload: await buildAggregateResponse(request, userKey, type, targets),
+    };
+  }
+
+  const targetUpstreamId = upstreamId || runtime.activeUpstreamId;
+  const upstream = getUpstreamSummary(upstreams, targetUpstreamId);
+  const userState = await getUserState(userKey, targetUpstreamId);
+
+  return {
+    message: userState.latestRegistration
+      ? "Cached user state returned."
+      : "Current user has no cached registration yet.",
+    payload: shapeRegistrationResponse(user, upstream, userState, type, relayUrls),
+  };
+}
+
 async function handleLogin(request, response) {
   const body = await readJsonBody(request);
   const password = (body.password || "").toString();
@@ -2456,6 +2559,8 @@ async function handleGenerateQrCode(request, response) {
 async function handleLatestSubscription(request, response, url) {
   const type = normalizeType(url.searchParams.get("type"));
   const userKey = normalizeUserKey(url.searchParams.get("user"));
+  const viewMode = (url.searchParams.get("view") || "").toString().trim().toLowerCase();
+  const localOnly = viewMode === "local";
   const runtime = await getActiveUpstreamRuntime();
   const upstreamId = (url.searchParams.get("upstreamId") || runtime.activeUpstreamId).toString();
 
@@ -2464,6 +2569,23 @@ async function handleLatestSubscription(request, response, url) {
       success: false,
       error: `Unsupported type: ${type}`,
       supportedTypes: Array.from(SUPPORTED_TYPES),
+    });
+    return;
+  }
+
+  if (localOnly) {
+    const cachedView = await buildCachedViewResponse(
+      request,
+      userKey,
+      type,
+      runtime,
+      url.searchParams.get("upstreamId") ? upstreamId : "",
+    );
+
+    sendJson(response, 200, {
+      success: true,
+      message: cachedView.message,
+      ...cachedView.payload,
     });
     return;
   }

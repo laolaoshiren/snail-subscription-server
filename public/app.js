@@ -125,6 +125,7 @@ const state = {
   relayUrlsByUser: {},
   userSummaries: [],
   currentUserKey: "userA",
+  currentViewUpstream: null,
   activeUpstreamId: "",
   activeUpstreamMode: ACTIVE_UPSTREAM_MODES.SINGLE,
   upstreamAggregation: {
@@ -142,6 +143,7 @@ const state = {
 let draggingUpstreamId = "";
 let qrModalRequestToken = 0;
 let copyToastTimer = 0;
+let userStateRequestToken = 0;
 
 async function copyText(value) {
   if (navigator.clipboard && window.isSecureContext) {
@@ -564,6 +566,48 @@ function getCurrentUser() {
   return state.users.find((user) => user.key === state.currentUserKey) || state.users[0] || {
     key: "userA",
     label: "用户A",
+  };
+}
+
+function getRuntimeSupportedProtocolTypes() {
+  if (isAggregateMode()) {
+    const supportedTypes = new Set();
+
+    getOrderedUpstreams().forEach((upstream) => {
+      if (upstream?.config?.enabled === false || getAggregateCopies(upstream.id) <= 0) {
+        return;
+      }
+
+      getSupportedProtocolTypes(upstream).forEach((type) => supportedTypes.add(type));
+    });
+
+    return supportedTypes.size > 0 ? Array.from(supportedTypes) : Object.keys(protocolLabels);
+  }
+
+  if (isPollingMode()) {
+    const supportedTypes = new Set();
+
+    getOrderedUpstreams().forEach((upstream) => {
+      if (upstream?.config?.enabled === false) {
+        return;
+      }
+
+      getSupportedProtocolTypes(upstream).forEach((type) => supportedTypes.add(type));
+    });
+
+    return supportedTypes.size > 0 ? Array.from(supportedTypes) : Object.keys(protocolLabels);
+  }
+
+  return getSupportedProtocolTypes(state.currentViewUpstream || getActiveUpstream());
+}
+
+function getCurrentViewUpstream() {
+  if (state.currentViewUpstream) {
+    return state.currentViewUpstream;
+  }
+
+  return {
+    supportedTypes: getRuntimeSupportedProtocolTypes(),
   };
 }
 
@@ -1086,6 +1130,16 @@ function renderHistory(history) {
   });
 }
 
+function renderCachedUserView() {
+  setText(activeUserLabel, getCurrentUser().label);
+  setText(activeUpstreamLabel, getRuntimeSelectionLabel(getActiveUpstream()));
+  setText(modeDescription, describeRuntimeSelection(getActiveUpstream()));
+  fillMeta(null);
+  renderLinks(state.relayUrlsByUser[state.currentUserKey] || null, getCurrentViewUpstream());
+  renderUsage(null);
+  renderHistory([]);
+}
+
 function renderUpstreamOverview(upstream) {
   const config = upstream?.config || {};
   const capabilitySummary = [];
@@ -1520,7 +1574,8 @@ function renderUserSwitcher() {
 
       state.currentUserKey = user.key;
       renderUserSwitcher();
-      await loadUserState();
+      renderCachedUserView();
+      await loadUserState({ localOnly: state.currentTab === "logs" });
     });
 
     userSwitcher.appendChild(button);
@@ -1621,6 +1676,7 @@ function applySession(payload) {
       : { counts: {} };
   state.relayUrlsByUser = payload.relayUrlsByUser || {};
   state.userSummaries = Array.isArray(payload.userSummaries) ? payload.userSummaries : [];
+  state.currentViewUpstream = null;
   state.activeUpstreamId = payload.activeUpstreamId || state.upstreams[0]?.id || "";
   state.activeUpstreamMode = payload.activeUpstreamMode || ACTIVE_UPSTREAM_MODES.SINGLE;
   state.appUpdate = payload.appUpdate || null;
@@ -1655,6 +1711,7 @@ function applySession(payload) {
 
 function applyUserPayload(payload) {
   const upstream = payload.upstream || getActiveUpstream();
+  state.currentViewUpstream = upstream;
   state.relayUrlsByUser[state.currentUserKey] =
     payload.relayUrls || state.relayUrlsByUser[state.currentUserKey] || {};
 
@@ -1670,18 +1727,33 @@ function applyUserPayload(payload) {
   renderUserSwitcher();
 }
 
-async function loadUserState() {
+async function loadUserState(options = {}) {
+  const localOnly = options.localOnly === true;
+  const requestToken = ++userStateRequestToken;
+
   setText(activeUserLabel, getCurrentUser().label);
   setText(activeUpstreamLabel, getRuntimeSelectionLabel(getActiveUpstream()));
   syncRegisterForm();
 
   try {
-    const latestQuery = isAggregateMode()
-      ? `/api/subscriptions/latest?type=full&user=${encodeURIComponent(state.currentUserKey)}`
-      : `/api/subscriptions/latest?type=full&user=${encodeURIComponent(state.currentUserKey)}&upstreamId=${encodeURIComponent(state.activeUpstreamId)}`;
-    const payload = await requestJson(
-      latestQuery,
-    );
+    const query = new URLSearchParams({
+      type: "full",
+      user: state.currentUserKey,
+    });
+
+    if (!isAggregateMode()) {
+      query.set("upstreamId", state.activeUpstreamId);
+    }
+
+    if (localOnly) {
+      query.set("view", "local");
+    }
+
+    const payload = await requestJson(`/api/subscriptions/latest?${query.toString()}`);
+
+    if (requestToken !== userStateRequestToken) {
+      return;
+    }
 
     applyUserPayload(payload);
 
@@ -1692,6 +1764,10 @@ async function loadUserState() {
 
     clearStatus();
   } catch (error) {
+    if (requestToken !== userStateRequestToken) {
+      return;
+    }
+
     if (error.status === 401) {
       showLogin();
       setStatus("登录状态已失效，请重新输入密码。", "error");
@@ -1717,7 +1793,8 @@ async function refreshSession() {
 
     showDashboard();
     applySession(payload);
-    await loadUserState();
+    renderCachedUserView();
+    await loadUserState({ localOnly: state.currentTab === "logs" });
   } catch (error) {
     setStatus(error.message, "error");
   }
@@ -2250,8 +2327,15 @@ if (logoutButton) {
 }
 
 tabButtons.forEach((button) => {
-  button.addEventListener("click", () => {
+  button.addEventListener("click", async () => {
     activateTab(button.dataset.tab);
+
+    if (!state.users.length || !["subscription", "logs"].includes(button.dataset.tab)) {
+      return;
+    }
+
+    renderCachedUserView();
+    await loadUserState({ localOnly: button.dataset.tab === "logs" });
   });
 });
 
