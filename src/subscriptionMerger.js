@@ -126,6 +126,7 @@ const MAIN_SELECTOR_GROUP_NAME = "\ud83d\udd30 \u8282\u70b9\u9009\u62e9";
 const AUTO_SELECT_GROUP_NAME = "\u267b\ufe0f \u81ea\u52a8\u9009\u62e9";
 const DIRECT_GROUP_NAME = "\ud83c\udfaf \u5168\u7403\u76f4\u8fde";
 const FALLBACK_GROUP_NAME = "\u2699\ufe0f \u6545\u969c\u8f6c\u79fb";
+const HONG_KONG_LOAD_BALANCE_GROUP_NAME = "\ud83c\udded\ud83c\uddf0 \u9999\u6e2f\u8d1f\u8f7d\u5747\u8861";
 const TOP_PRIORITY_GROUP_NAMES = [
   MAIN_SELECTOR_GROUP_NAME,
   AUTO_SELECT_GROUP_NAME,
@@ -345,6 +346,30 @@ function buildAggregateCountryGroups(proxies) {
   }).filter(Boolean);
 }
 
+function buildAggregateRegionalLoadBalanceGroups(proxies) {
+  const hongKongProxyNames = proxies
+    .filter((proxy) => proxy?.__aggregateCountryGroup === "hong-kong")
+    .map((proxy) => proxy?.name)
+    .filter(Boolean);
+
+  if (hongKongProxyNames.length < 2) {
+    return [];
+  }
+
+  return [
+    {
+      name: HONG_KONG_LOAD_BALANCE_GROUP_NAME,
+      type: "load-balance",
+      url: AGGREGATE_HEALTHCHECK_URL,
+      interval: AGGREGATE_HEALTHCHECK_INTERVAL_SECONDS,
+      lazy: false,
+      timeout: AGGREGATE_HEALTHCHECK_TIMEOUT_MS,
+      strategy: "consistent-hashing",
+      proxies: collectUniqueValues(hongKongProxyNames),
+    },
+  ];
+}
+
 function prioritizeValues(values, priorityValues, additions = []) {
   const nextValues = collectUniqueValues(Array.isArray(values) ? values : []).filter(Boolean);
   const uniquePriorityValues = collectUniqueValues(priorityValues).filter((value) => nextValues.includes(value));
@@ -365,7 +390,7 @@ function tuneAggregateHealthCheckGroup(group) {
     return group;
   }
 
-  if (group.type !== "url-test" && group.type !== "fallback") {
+  if (group.type !== "url-test" && group.type !== "fallback" && group.type !== "load-balance") {
     return group;
   }
 
@@ -377,8 +402,8 @@ function tuneAggregateHealthCheckGroup(group) {
   };
 }
 
-function prioritizeAggregateCountryGroups(groups, countryGroups) {
-  if (!Array.isArray(groups) || countryGroups.length === 0) {
+function prioritizeAggregateGeneratedGroups(groups, generatedGroups) {
+  if (!Array.isArray(groups) || generatedGroups.length === 0) {
     return Array.isArray(groups) ? groups : [];
   }
 
@@ -387,13 +412,13 @@ function prioritizeAggregateCountryGroups(groups, countryGroups) {
       .map((group) => (group && typeof group === "object" ? group.name : ""))
       .filter(Boolean),
   );
-  const uniqueCountryGroups = countryGroups.filter((group) => !existingGroupNames.has(group.name));
+  const uniqueGeneratedGroups = generatedGroups.filter((group) => !existingGroupNames.has(group.name));
 
-  if (uniqueCountryGroups.length === 0) {
+  if (uniqueGeneratedGroups.length === 0) {
     return groups;
   }
 
-  const countryGroupNameSet = new Set(uniqueCountryGroups.map((group) => group.name).filter(Boolean));
+  const generatedGroupNameSet = new Set(uniqueGeneratedGroups.map((group) => group.name).filter(Boolean));
   const groupByName = new Map();
 
   groups.forEach((group) => {
@@ -404,19 +429,19 @@ function prioritizeAggregateCountryGroups(groups, countryGroups) {
     groupByName.set(group.name, group);
   });
 
-  uniqueCountryGroups.forEach((group) => {
+  uniqueGeneratedGroups.forEach((group) => {
     if (group?.name && !groupByName.has(group.name)) {
       groupByName.set(group.name, group);
     }
   });
 
-  const topGroupNames = [...TOP_PRIORITY_GROUP_NAMES, ...uniqueCountryGroups.map((group) => group.name)];
+  const topGroupNames = [...TOP_PRIORITY_GROUP_NAMES, ...uniqueGeneratedGroups.map((group) => group.name)];
   const prioritizedNames = topGroupNames.filter((name) => groupByName.has(name));
   const prioritizedNameSet = new Set(prioritizedNames);
   const prioritizedGroups = prioritizedNames.map((name) => groupByName.get(name)).filter(Boolean);
   const remainingGroups = groups.filter((group) => {
     const groupName = group && typeof group === "object" ? group.name : "";
-    return !groupName || (!prioritizedNameSet.has(groupName) && !countryGroupNameSet.has(groupName));
+    return !groupName || (!prioritizedNameSet.has(groupName) && !generatedGroupNameSet.has(groupName));
   });
 
   return [...prioritizedGroups, ...remainingGroups];
@@ -474,7 +499,9 @@ function mergeClashTemplate(template, proxies) {
   const templateProxyNameSet = new Set(templateProxyNames);
   const mergedProxyNames = proxies.map((proxy) => proxy.name).filter(Boolean);
   const countryGroups = buildAggregateCountryGroups(proxies);
-  const countryGroupNames = countryGroups.map((group) => group.name);
+  const regionalLoadBalanceGroups = buildAggregateRegionalLoadBalanceGroups(proxies);
+  const generatedSelectorGroups = [...regionalLoadBalanceGroups, ...countryGroups];
+  const generatedSelectorGroupNames = generatedSelectorGroups.map((group) => group.name).filter(Boolean);
 
   nextTemplate.proxies = proxies;
 
@@ -485,7 +512,7 @@ function mergeClashTemplate(template, proxies) {
       }
 
       const shouldInjectCountryGroups =
-        countryGroupNames.length > 0 && shouldInjectCountryGroupsIntoSelector(group);
+        generatedSelectorGroupNames.length > 0 && shouldInjectCountryGroupsIntoSelector(group);
       const selectorPriorityNames =
         group.name === MAIN_SELECTOR_GROUP_NAME
           ? [AUTO_SELECT_GROUP_NAME, DIRECT_GROUP_NAME, FALLBACK_GROUP_NAME]
@@ -498,7 +525,7 @@ function mergeClashTemplate(template, proxies) {
             proxies: prioritizeValues(
               group.proxies,
               selectorPriorityNames,
-              countryGroupNames,
+              generatedSelectorGroupNames,
             ),
           });
         }
@@ -512,13 +539,13 @@ function mergeClashTemplate(template, proxies) {
           ? prioritizeValues(
               replaceTemplateProxyNames(group.proxies, templateProxyNameSet, mergedProxyNames),
               selectorPriorityNames,
-              countryGroupNames,
+              generatedSelectorGroupNames,
             )
           : replaceTemplateProxyNames(group.proxies, templateProxyNameSet, mergedProxyNames),
       };
     });
 
-    nextProxyGroups = prioritizeAggregateCountryGroups(nextProxyGroups, countryGroups);
+    nextProxyGroups = prioritizeAggregateGeneratedGroups(nextProxyGroups, generatedSelectorGroups);
     nextTemplate["proxy-groups"] = nextProxyGroups;
   }
 
