@@ -523,6 +523,538 @@ function sanitizeSubscriptionBody(bodyBuffer) {
   return Buffer.from(sanitizeYamlSubscriptionBody(rawBody), "utf8");
 }
 
+const CLASH_FALLBACK_HEALTHCHECK_URL = "http://www.gstatic.com/generate_204";
+const CLASH_FALLBACK_HEALTHCHECK_INTERVAL_SECONDS = 30;
+const CLASH_FALLBACK_HEALTHCHECK_TIMEOUT_MS = 5000;
+const CLASH_FALLBACK_MAIN_GROUP = "\ud83d\udd30 \u8282\u70b9\u9009\u62e9";
+const CLASH_FALLBACK_AUTO_GROUP = "\u267b\ufe0f \u81ea\u52a8\u9009\u62e9";
+const CLASH_FALLBACK_FAILOVER_GROUP = "\u2699\ufe0f \u6545\u969c\u8f6c\u79fb";
+const CLASH_FALLBACK_DIRECT_GROUP = "\ud83c\udfaf \u5168\u7403\u76f4\u8fde";
+const CLASH_FALLBACK_FINAL_GROUP = "\ud83d\udc1f \u6f0f\u7f51\u4e4b\u9c7c";
+
+function decodeUriComponentSafely(value) {
+  try {
+    return decodeURIComponent(value || "");
+  } catch (error) {
+    return (value || "").toString();
+  }
+}
+
+function normalizeInteger(value, fallback = 0) {
+  const parsed = Number.parseInt(value, 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function parseQueryBoolean(value, fallback = false) {
+  if (value === undefined || value === null || value === "") {
+    return fallback;
+  }
+
+  const normalized = value.toString().trim().toLowerCase();
+  if (["1", "true", "yes", "on"].includes(normalized)) {
+    return true;
+  }
+  if (["0", "false", "no", "off"].includes(normalized)) {
+    return false;
+  }
+  return fallback;
+}
+
+function splitUniversalSubscriptionLines(rawBody) {
+  const trimmedBody = (rawBody || "").toString("utf8").trim();
+  if (!trimmedBody) {
+    return [];
+  }
+
+  const decodedBody = tryDecodeBase64(trimmedBody);
+  const subscriptionText = decodedBody && /:\/\//.test(decodedBody) ? decodedBody : trimmedBody;
+  return subscriptionText
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+}
+
+function buildUniqueProxyName(name, usedNames) {
+  const baseName = (name || "node").toString().trim() || "node";
+  let candidate = baseName;
+  let suffix = 2;
+
+  while (usedNames.has(candidate)) {
+    candidate = `${baseName} ${suffix}`;
+    suffix += 1;
+  }
+
+  usedNames.add(candidate);
+  return candidate;
+}
+
+function parseSsPluginOptions(pluginValue = "") {
+  const decodedPlugin = decodeUriComponentSafely(pluginValue);
+  if (!decodedPlugin) {
+    return {};
+  }
+
+  const segments = decodedPlugin
+    .split(";")
+    .map((segment) => segment.trim())
+    .filter(Boolean);
+  if (segments.length === 0) {
+    return {};
+  }
+
+  const pluginName = segments.shift();
+  const rawOptions = Object.fromEntries(
+    segments.map((segment) => {
+      const separatorIndex = segment.indexOf("=");
+      if (separatorIndex < 0) {
+        return [segment, "true"];
+      }
+      return [
+        segment.slice(0, separatorIndex).trim(),
+        decodeUriComponentSafely(segment.slice(separatorIndex + 1).trim()),
+      ];
+    }),
+  );
+
+  if (pluginName === "obfs-local" || pluginName === "simple-obfs") {
+    const pluginOpts = {};
+    if (rawOptions.obfs || rawOptions.mode) {
+      pluginOpts.mode = rawOptions.obfs || rawOptions.mode;
+    }
+    if (rawOptions["obfs-host"] || rawOptions.host) {
+      pluginOpts.host = rawOptions["obfs-host"] || rawOptions.host;
+    }
+
+    return {
+      plugin: pluginName,
+      "plugin-opts": pluginOpts,
+    };
+  }
+
+  if (pluginName === "v2ray-plugin") {
+    const pluginOpts = {};
+    if (rawOptions.mode) {
+      pluginOpts.mode = rawOptions.mode;
+    }
+    if (rawOptions.host) {
+      pluginOpts.host = rawOptions.host;
+    }
+    if (rawOptions.path) {
+      pluginOpts.path = rawOptions.path;
+    }
+    if (parseQueryBoolean(rawOptions.tls, false)) {
+      pluginOpts.tls = true;
+    }
+
+    return {
+      plugin: pluginName,
+      "plugin-opts": pluginOpts,
+    };
+  }
+
+  return {
+    plugin: pluginName,
+    "plugin-opts": rawOptions,
+  };
+}
+
+function parseSsUriToClashProxy(line) {
+  let rest = line.slice("ss://".length).trim();
+  let fragment = "";
+  let query = "";
+
+  const hashIndex = rest.indexOf("#");
+  if (hashIndex >= 0) {
+    fragment = rest.slice(hashIndex + 1);
+    rest = rest.slice(0, hashIndex);
+  }
+
+  const queryIndex = rest.indexOf("?");
+  if (queryIndex >= 0) {
+    query = rest.slice(queryIndex + 1);
+    rest = rest.slice(0, queryIndex);
+  }
+
+  let userInfo = "";
+  let hostPort = "";
+  const atIndex = rest.lastIndexOf("@");
+  if (atIndex >= 0) {
+    userInfo = rest.slice(0, atIndex);
+    hostPort = rest.slice(atIndex + 1);
+  } else {
+    const decoded = tryDecodeBase64(rest);
+    if (!decoded || !decoded.includes("@")) {
+      return null;
+    }
+    const decodedAtIndex = decoded.lastIndexOf("@");
+    userInfo = decoded.slice(0, decodedAtIndex);
+    hostPort = decoded.slice(decodedAtIndex + 1);
+  }
+
+  if (!userInfo.includes(":")) {
+    userInfo = tryDecodeBase64(userInfo);
+  }
+  if (!userInfo || !userInfo.includes(":")) {
+    return null;
+  }
+
+  const separatorIndex = userInfo.indexOf(":");
+  const cipher = decodeUriComponentSafely(userInfo.slice(0, separatorIndex));
+  const password = decodeUriComponentSafely(userInfo.slice(separatorIndex + 1));
+  if (!cipher || !password || !hostPort) {
+    return null;
+  }
+
+  const parsedEndpoint = new URL(`http://${hostPort}`);
+  const proxy = {
+    name: decodeUriComponentSafely(fragment) || parsedEndpoint.hostname || "ss",
+    type: "ss",
+    server: parsedEndpoint.hostname,
+    port: normalizeInteger(parsedEndpoint.port, 8388),
+    cipher,
+    password,
+    udp: true,
+  };
+
+  const pluginConfig = parseSsPluginOptions(new URLSearchParams(query).get("plugin") || "");
+  if (pluginConfig.plugin) {
+    proxy.plugin = pluginConfig.plugin;
+    proxy["plugin-opts"] = pluginConfig["plugin-opts"];
+  }
+
+  return proxy;
+}
+
+function parseVmessUriToClashProxy(line) {
+  const encoded = line.slice("vmess://".length).trim();
+  const decoded = tryDecodeBase64(encoded);
+  if (!decoded) {
+    return null;
+  }
+
+  const payload = JSON.parse(decoded);
+  const tlsValue = (payload.tls || payload.security || "").toString().trim().toLowerCase();
+  const network = (payload.net || "tcp").toString().trim().toLowerCase() || "tcp";
+  const proxy = {
+    name: payload.ps || payload.add || "vmess",
+    type: "vmess",
+    server: payload.add || "",
+    port: normalizeInteger(payload.port, 443),
+    uuid: payload.id || "",
+    alterId: Number.parseInt(payload.aid || "0", 10) || 0,
+    cipher: payload.scy || "auto",
+    udp: true,
+  };
+
+  if (!proxy.server || !proxy.uuid) {
+    return null;
+  }
+
+  if (tlsValue && tlsValue !== "none" && tlsValue !== "false") {
+    proxy.tls = true;
+    if (payload.sni || payload.host) {
+      proxy.servername = payload.sni || payload.host;
+    }
+  }
+  if (parseQueryBoolean(payload.allowInsecure || payload["skip-cert-verify"], false)) {
+    proxy["skip-cert-verify"] = true;
+  }
+  if (network !== "tcp") {
+    proxy.network = network;
+  }
+  if (network === "ws") {
+    proxy["ws-opts"] = {
+      path: payload.path || "/",
+      headers: payload.host ? { Host: payload.host } : undefined,
+    };
+  } else if (network === "grpc") {
+    proxy["grpc-opts"] = {
+      "grpc-service-name": payload.path || payload.serviceName || "",
+    };
+  } else if (network === "h2" || network === "http") {
+    proxy["h2-opts"] = {
+      path: payload.path || "/",
+      host: payload.host ? [payload.host] : undefined,
+    };
+  }
+
+  return proxy;
+}
+
+function parseTrojanUriToClashProxy(line) {
+  const parsedUrl = new URL(line);
+  const params = parsedUrl.searchParams;
+  const network = (params.get("type") || "tcp").toLowerCase();
+  const proxy = {
+    name: decodeUriComponentSafely(parsedUrl.hash.slice(1)) || parsedUrl.hostname || "trojan",
+    type: "trojan",
+    server: parsedUrl.hostname,
+    port: normalizeInteger(parsedUrl.port, 443),
+    password: decodeUriComponentSafely(parsedUrl.username),
+    udp: parseQueryBoolean(params.get("udp"), true),
+    sni: params.get("sni") || params.get("peer") || parsedUrl.hostname,
+  };
+
+  if (!proxy.server || !proxy.password) {
+    return null;
+  }
+
+  if (parseQueryBoolean(params.get("allowInsecure") || params.get("insecure"), false)) {
+    proxy["skip-cert-verify"] = true;
+  }
+  if (network !== "tcp") {
+    proxy.network = network;
+  }
+  if (network === "ws") {
+    proxy["ws-opts"] = {
+      path: params.get("path") || "/",
+      headers: params.get("host") ? { Host: params.get("host") } : undefined,
+    };
+  } else if (network === "grpc") {
+    proxy["grpc-opts"] = {
+      "grpc-service-name": params.get("serviceName") || params.get("service-name") || "",
+    };
+  }
+  if (params.get("alpn")) {
+    proxy.alpn = params
+      .get("alpn")
+      .split(",")
+      .map((value) => value.trim())
+      .filter(Boolean);
+  }
+
+  return proxy;
+}
+
+function parseVlessUriToClashProxy(line) {
+  const parsedUrl = new URL(line);
+  const params = parsedUrl.searchParams;
+  const security = (params.get("security") || "none").toLowerCase();
+  const network = (params.get("type") || "tcp").toLowerCase();
+  const proxy = {
+    name: decodeUriComponentSafely(parsedUrl.hash.slice(1)) || parsedUrl.hostname || "vless",
+    type: "vless",
+    server: parsedUrl.hostname,
+    port: normalizeInteger(parsedUrl.port, security === "tls" || security === "reality" ? 443 : 80),
+    uuid: decodeUriComponentSafely(parsedUrl.username),
+    cipher: "auto",
+    udp: parseQueryBoolean(params.get("udp"), true),
+  };
+
+  if (!proxy.server || !proxy.uuid) {
+    return null;
+  }
+
+  if (security === "tls" || security === "reality") {
+    proxy.tls = true;
+    proxy.servername = params.get("sni") || params.get("host") || parsedUrl.hostname;
+  }
+  if (security === "reality") {
+    proxy["client-fingerprint"] = params.get("fp") || "chrome";
+    proxy["reality-opts"] = {
+      "public-key": params.get("pbk") || "",
+      "short-id": params.get("sid") || "",
+    };
+  }
+  if (params.get("flow")) {
+    proxy.flow = params.get("flow");
+  }
+  if (parseQueryBoolean(params.get("allowInsecure") || params.get("insecure"), false)) {
+    proxy["skip-cert-verify"] = true;
+  }
+  if (network !== "tcp") {
+    proxy.network = network;
+  }
+  if (network === "ws") {
+    proxy["ws-opts"] = {
+      path: params.get("path") || "/",
+      headers: params.get("host") ? { Host: params.get("host") } : undefined,
+    };
+  } else if (network === "grpc") {
+    proxy["grpc-opts"] = {
+      "grpc-service-name": params.get("serviceName") || params.get("service-name") || "",
+    };
+  }
+  if (params.get("alpn")) {
+    proxy.alpn = params
+      .get("alpn")
+      .split(",")
+      .map((value) => value.trim())
+      .filter(Boolean);
+  }
+
+  return proxy;
+}
+
+function parseHysteria2UriToClashProxy(line) {
+  const parsedUrl = new URL(line.replace(/^hy2:\/\//i, "hysteria2://"));
+  const params = parsedUrl.searchParams;
+  const proxy = {
+    name: decodeUriComponentSafely(parsedUrl.hash.slice(1)) || parsedUrl.hostname || "hysteria2",
+    type: "hysteria2",
+    server: parsedUrl.hostname,
+    port: normalizeInteger(parsedUrl.port, 443),
+    password:
+      decodeUriComponentSafely(parsedUrl.username) ||
+      decodeUriComponentSafely(params.get("auth") || params.get("password")),
+    sni: params.get("sni") || parsedUrl.hostname,
+  };
+
+  if (!proxy.server || !proxy.password) {
+    return null;
+  }
+
+  if (parseQueryBoolean(params.get("insecure"), false)) {
+    proxy["skip-cert-verify"] = true;
+  }
+  if (params.get("obfs")) {
+    proxy.obfs = params.get("obfs");
+  }
+  if (params.get("obfs-password")) {
+    proxy["obfs-password"] = params.get("obfs-password");
+  }
+  if (params.get("upmbps") || params.get("up")) {
+    proxy.up = params.get("upmbps") || params.get("up");
+  }
+  if (params.get("downmbps") || params.get("down")) {
+    proxy.down = params.get("downmbps") || params.get("down");
+  }
+
+  return proxy;
+}
+
+function parseUniversalUriToClashProxy(line) {
+  const trimmedLine = (line || "").trim();
+  if (!trimmedLine) {
+    return null;
+  }
+
+  try {
+    if (/^ss:\/\//i.test(trimmedLine)) {
+      return parseSsUriToClashProxy(trimmedLine);
+    }
+    if (/^vmess:\/\//i.test(trimmedLine)) {
+      return parseVmessUriToClashProxy(trimmedLine);
+    }
+    if (/^trojan:\/\//i.test(trimmedLine)) {
+      return parseTrojanUriToClashProxy(trimmedLine);
+    }
+    if (/^vless:\/\//i.test(trimmedLine)) {
+      return parseVlessUriToClashProxy(trimmedLine);
+    }
+    if (/^(hysteria2|hy2):\/\//i.test(trimmedLine)) {
+      return parseHysteria2UriToClashProxy(trimmedLine);
+    }
+  } catch (error) {
+    return null;
+  }
+
+  return null;
+}
+
+function buildFallbackClashConfig(proxies) {
+  const proxyNames = proxies.map((proxy) => proxy.name).filter(Boolean);
+
+  return {
+    "mixed-port": 7890,
+    "allow-lan": true,
+    mode: "rule",
+    "log-level": "info",
+    proxies,
+    "proxy-groups": [
+      {
+        name: CLASH_FALLBACK_MAIN_GROUP,
+        type: "select",
+        proxies: [
+          CLASH_FALLBACK_AUTO_GROUP,
+          CLASH_FALLBACK_DIRECT_GROUP,
+          CLASH_FALLBACK_FAILOVER_GROUP,
+          ...proxyNames,
+        ],
+      },
+      {
+        name: CLASH_FALLBACK_AUTO_GROUP,
+        type: "url-test",
+        proxies: proxyNames,
+        url: CLASH_FALLBACK_HEALTHCHECK_URL,
+        interval: CLASH_FALLBACK_HEALTHCHECK_INTERVAL_SECONDS,
+        lazy: false,
+        timeout: CLASH_FALLBACK_HEALTHCHECK_TIMEOUT_MS,
+      },
+      {
+        name: CLASH_FALLBACK_FAILOVER_GROUP,
+        type: "fallback",
+        proxies: proxyNames,
+        url: CLASH_FALLBACK_HEALTHCHECK_URL,
+        interval: CLASH_FALLBACK_HEALTHCHECK_INTERVAL_SECONDS,
+        lazy: false,
+        timeout: CLASH_FALLBACK_HEALTHCHECK_TIMEOUT_MS,
+      },
+      {
+        name: CLASH_FALLBACK_DIRECT_GROUP,
+        type: "select",
+        proxies: ["DIRECT"],
+      },
+      {
+        name: CLASH_FALLBACK_FINAL_GROUP,
+        type: "select",
+        proxies: [CLASH_FALLBACK_MAIN_GROUP, CLASH_FALLBACK_DIRECT_GROUP],
+      },
+    ],
+    rules: [`MATCH,${CLASH_FALLBACK_FINAL_GROUP}`],
+  };
+}
+
+async function tryConvertUniversalBodyToClash(bodyBuffer) {
+  const lines = splitUniversalSubscriptionLines(bodyBuffer);
+  if (lines.length === 0) {
+    return null;
+  }
+
+  const usedNames = new Set();
+  const proxies = lines
+    .map((line) => parseUniversalUriToClashProxy(line))
+    .filter(Boolean)
+    .map((proxy) => ({
+      ...proxy,
+      name: buildUniqueProxyName(proxy.name, usedNames),
+    }));
+
+  if (proxies.length === 0) {
+    return null;
+  }
+
+  return Buffer.from(
+    yaml.dump(buildFallbackClashConfig(proxies), {
+      noRefs: true,
+      lineWidth: -1,
+    }),
+    "utf8",
+  );
+}
+
+async function normalizeSubscriptionPayload(type, bodyBuffer) {
+  const sanitizedBody = sanitizeSubscriptionBody(bodyBuffer);
+
+  try {
+    validateSubscriptionPayload(type, sanitizedBody);
+    return sanitizedBody;
+  } catch (error) {
+    if (type !== "clash") {
+      throw error;
+    }
+
+    const convertedBody = await tryConvertUniversalBodyToClash(sanitizedBody);
+    if (!convertedBody) {
+      throw error;
+    }
+
+    const sanitizedConvertedBody = sanitizeSubscriptionBody(convertedBody);
+    validateSubscriptionPayload(type, sanitizedConvertedBody);
+    return sanitizedConvertedBody;
+  }
+}
+
 function sanitizeRegistration(record) {
   if (!record) {
     return null;
@@ -1230,8 +1762,10 @@ async function probeUpstreamSubscription(record, supportedTypes = []) {
     throw new Error(`Subscription request failed with status ${response.status}.`);
   }
 
-  const sanitizedBody = sanitizeSubscriptionBody(Buffer.from(await response.arrayBuffer()));
-  validateSubscriptionPayload(probeType, sanitizedBody);
+  await normalizeSubscriptionPayload(
+    probeType,
+    Buffer.from(await response.arrayBuffer()),
+  );
 
   return {
     verified: true,
@@ -1306,15 +1840,15 @@ async function fetchResolvedSubscriptionSource(source, type, requestMethod = "GE
   }
 
   headers["profile-update-interval"] = profileUpdateIntervalHours;
+  headers["content-type"] = getContentTypeByRelayType(
+    type,
+    headers["content-type"] || "text/plain; charset=utf-8",
+  );
 
   const body =
     requestMethod === "HEAD"
       ? Buffer.alloc(0)
-      : sanitizeSubscriptionBody(Buffer.from(await upstreamResponse.arrayBuffer()));
-
-  if (requestMethod !== "HEAD") {
-    validateSubscriptionPayload(type, body);
-  }
+      : await normalizeSubscriptionPayload(type, Buffer.from(await upstreamResponse.arrayBuffer()));
 
   return {
     headers,
@@ -1987,7 +2521,6 @@ async function proxySubscription(response, request, type, url) {
       userState = result.userState;
       latest = userState.latestRegistration;
 
-      const upstreamUrl = latest?.clientUrls?.[type];
       const subscriptionUpdateIntervalMinutes = normalizeSubscriptionUpdateIntervalMinutes(
         upstreamConfig?.subscriptionUpdateIntervalMinutes,
       );
@@ -1995,7 +2528,7 @@ async function proxySubscription(response, request, type, url) {
         subscriptionUpdateIntervalMinutes,
       );
 
-      if (!upstreamUrl) {
+      if (!latest?.clientUrls?.[type]) {
         throw new Error(`Unsupported relay type: ${type}`);
       }
 
@@ -2030,14 +2563,14 @@ async function proxySubscription(response, request, type, url) {
         return;
       }
 
-      const upstreamResponse = await fetchUpstreamSubscription(upstreamUrl);
-      if (!upstreamResponse.ok) {
-        const nextError = new Error(
-          `Upstream subscription request failed with status ${upstreamResponse.status}.`,
-        );
-        nextError.status = upstreamResponse.status;
-        throw nextError;
-      }
+      const payload = await fetchResolvedSubscriptionSource(
+        {
+          upstreamConfig,
+          userState,
+        },
+        type,
+        request.method,
+      );
 
       await appendUserHistory(relayUser.key, upstreamId, {
         action: "relay_success",
@@ -2050,33 +2583,14 @@ async function proxySubscription(response, request, type, url) {
         usage: userState.latestUsage,
       });
 
-      const headers = {};
-      upstreamResponse.headers.forEach((value, key) => {
-        const normalizedKey = key.toLowerCase();
-        if (FORWARDED_HEADERS.has(normalizedKey)) {
-          headers[normalizedKey] = value;
-        }
-      });
-      if (!headers["subscription-userinfo"]) {
-        const fallbackUserInfoHeader = await fetchFallbackSubscriptionUserInfoHeader(
-          latest?.clientUrls,
-          type,
-        );
-        if (fallbackUserInfoHeader) {
-          headers["subscription-userinfo"] = fallbackUserInfoHeader;
-        }
-      }
-      headers["profile-update-interval"] = profileUpdateIntervalHours;
-
-      const body = sanitizeSubscriptionBody(Buffer.from(await upstreamResponse.arrayBuffer()));
-      response.writeHead(200, headers);
+      response.writeHead(200, payload.headers);
 
       if (request.method === "HEAD") {
         response.end();
         return;
       }
 
-      response.end(body);
+      response.end(payload.body);
       return;
     } catch (error) {
       lastFailure = error;
