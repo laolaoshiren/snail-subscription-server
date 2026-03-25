@@ -125,6 +125,11 @@ const AGGREGATE_HEALTHCHECK_TIMEOUT_MS = 5000;
 const MAIN_SELECTOR_GROUP_NAME = "\ud83d\udd30 \u8282\u70b9\u9009\u62e9";
 const AUTO_SELECT_GROUP_NAME = "\u267b\ufe0f \u81ea\u52a8\u9009\u62e9";
 const FALLBACK_GROUP_NAME = "\u2699\ufe0f \u6545\u969c\u8f6c\u79fb";
+const COUNTRY_GROUP_SELECTOR_ANCHOR_NAMES = new Set([
+  MAIN_SELECTOR_GROUP_NAME,
+  AUTO_SELECT_GROUP_NAME,
+  FALLBACK_GROUP_NAME,
+]);
 const COUNTRY_GROUP_INSERT_AFTER_NAMES = new Set([
   MAIN_SELECTOR_GROUP_NAME,
   AUTO_SELECT_GROUP_NAME,
@@ -385,6 +390,16 @@ function insertAggregateCountryGroups(groups, countryGroups) {
   ];
 }
 
+function shouldInjectCountryGroupsIntoSelector(group) {
+  return Boolean(
+    group
+    && typeof group === "object"
+    && group.type === "select"
+    && Array.isArray(group.proxies)
+    && group.proxies.includes(MAIN_SELECTOR_GROUP_NAME),
+  );
+}
+
 function extractBodyBuffers(entries) {
   return normalizeSourceEntries(entries).map((entry) => entry.bodyBuffer);
 }
@@ -437,11 +452,18 @@ function mergeClashTemplate(template, proxies) {
         return tuneAggregateHealthCheckGroup(group);
       }
 
+      const shouldInjectCountryGroups =
+        countryGroupNames.length > 0 && shouldInjectCountryGroupsIntoSelector(group);
+
       if (!group.proxies.some((value) => templateProxyNameSet.has(value))) {
-        if (group.name === MAIN_SELECTOR_GROUP_NAME && countryGroupNames.length > 0) {
+        if (shouldInjectCountryGroups) {
           return tuneAggregateHealthCheckGroup({
             ...cloneSerializable(group),
-            proxies: insertAfterLastAnchor(group.proxies, countryGroupNames, new Set([FALLBACK_GROUP_NAME])),
+            proxies: insertAfterLastAnchor(
+              group.proxies,
+              countryGroupNames,
+              COUNTRY_GROUP_SELECTOR_ANCHOR_NAMES,
+            ),
           });
         }
 
@@ -450,14 +472,13 @@ function mergeClashTemplate(template, proxies) {
 
       return {
         ...tuneAggregateHealthCheckGroup(group),
-        proxies:
-          group.name === MAIN_SELECTOR_GROUP_NAME && countryGroupNames.length > 0
-            ? insertAfterLastAnchor(
-                replaceTemplateProxyNames(group.proxies, templateProxyNameSet, mergedProxyNames),
-                countryGroupNames,
-                new Set([FALLBACK_GROUP_NAME]),
-              )
-            : replaceTemplateProxyNames(group.proxies, templateProxyNameSet, mergedProxyNames),
+        proxies: shouldInjectCountryGroups
+          ? insertAfterLastAnchor(
+              replaceTemplateProxyNames(group.proxies, templateProxyNameSet, mergedProxyNames),
+              countryGroupNames,
+              COUNTRY_GROUP_SELECTOR_ANCHOR_NAMES,
+            )
+          : replaceTemplateProxyNames(group.proxies, templateProxyNameSet, mergedProxyNames),
       };
     });
 
