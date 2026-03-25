@@ -411,30 +411,45 @@ function buildAggregateRegionalLoadBalanceGroups(proxies) {
 }
 
 function buildAggregateGeneratedSelectorGroups(countryGroups, loadBalanceGroups) {
+  const loadBalanceOrder = AGGREGATE_LOAD_BALANCE_GROUP_DEFINITIONS.map((definition) => definition.key);
+  const countryOrder = CLASH_COUNTRY_GROUP_DEFINITIONS.map((definition) => definition.key);
   const loadBalanceByCountryKey = new Map(
     loadBalanceGroups
+      .map((group) => [group?.__aggregateCountryGroup, group])
+      .filter(([key, group]) => key && group),
+  );
+  const countryGroupByKey = new Map(
+    countryGroups
       .map((group) => [group?.__aggregateCountryGroup, group])
       .filter(([key, group]) => key && group),
   );
   const orderedGroups = [];
   const addedNames = new Set();
 
-  countryGroups.forEach((countryGroup) => {
-    const countryKey = countryGroup?.__aggregateCountryGroup;
-    const loadBalanceGroup = loadBalanceByCountryKey.get(countryKey);
-
-    if (loadBalanceGroup && !addedNames.has(loadBalanceGroup.name)) {
-      orderedGroups.push(loadBalanceGroup);
-      addedNames.add(loadBalanceGroup.name);
+  loadBalanceOrder.forEach((countryKey) => {
+    const group = loadBalanceByCountryKey.get(countryKey);
+    if (group?.name && !addedNames.has(group.name)) {
+      orderedGroups.push(group);
+      addedNames.add(group.name);
     }
+  });
 
-    if (countryGroup?.name && !addedNames.has(countryGroup.name)) {
-      orderedGroups.push(countryGroup);
-      addedNames.add(countryGroup.name);
+  countryOrder.forEach((countryKey) => {
+    const group = countryGroupByKey.get(countryKey);
+    if (group?.name && !addedNames.has(group.name)) {
+      orderedGroups.push(group);
+      addedNames.add(group.name);
     }
   });
 
   loadBalanceGroups.forEach((group) => {
+    if (group?.name && !addedNames.has(group.name)) {
+      orderedGroups.push(group);
+      addedNames.add(group.name);
+    }
+  });
+
+  countryGroups.forEach((group) => {
     if (group?.name && !addedNames.has(group.name)) {
       orderedGroups.push(group);
       addedNames.add(group.name);
