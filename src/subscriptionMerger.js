@@ -217,6 +217,44 @@ const CLASH_COUNTRY_GROUP_DEFINITIONS = [
       tokenSet.has("sgp"),
   },
   {
+    key: "south-korea",
+    name: "\ud83c\uddf0\ud83c\uddf7 \u97e9\u56fd\u8282\u70b9",
+    match: ({ rawName, normalizedName, tokenSet }) =>
+      rawName.includes("\ud83c\uddf0\ud83c\uddf7") ||
+      normalizedName.includes("\u97e9\u56fd") ||
+      normalizedName.includes("\u97d3\u570b") ||
+      normalizedName.includes("\u9996\u5c14") ||
+      normalizedName.includes("\u9996\u723e") ||
+      normalizedName.includes("\u91dc\u5c71") ||
+      normalizedName.includes("korea") ||
+      normalizedName.includes("south korea") ||
+      normalizedName.includes("southkorea") ||
+      normalizedName.includes("seoul") ||
+      normalizedName.includes("busan") ||
+      tokenSet.has("kr") ||
+      tokenSet.has("kor"),
+  },
+  {
+    key: "united-kingdom",
+    name: "\ud83c\uddec\ud83c\udde7 \u82f1\u56fd\u8282\u70b9",
+    match: ({ rawName, normalizedName, tokenSet }) =>
+      rawName.includes("\ud83c\uddec\ud83c\udde7") ||
+      normalizedName.includes("\u82f1\u56fd") ||
+      normalizedName.includes("\u82f1\u570b") ||
+      normalizedName.includes("\u4f26\u6566") ||
+      normalizedName.includes("\u502b\u6566") ||
+      normalizedName.includes("\u66fc\u5f7b\u65af\u7279") ||
+      normalizedName.includes("united kingdom") ||
+      normalizedName.includes("unitedkingdom") ||
+      normalizedName.includes("britain") ||
+      normalizedName.includes("england") ||
+      normalizedName.includes("london") ||
+      normalizedName.includes("manchester") ||
+      tokenSet.has("uk") ||
+      tokenSet.has("gb") ||
+      tokenSet.has("gbr"),
+  },
+  {
     key: "russia",
     name: "\ud83c\uddf7\ud83c\uddfa \u4fc4\u7f57\u65af\u8282\u70b9",
     match: ({ rawName, normalizedName, tokenSet }) =>
