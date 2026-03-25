@@ -19,7 +19,7 @@ module.exports = defineUpstreamModule({
   manifest: {
     id: "baobeiyun",
     label: "宝贝云",
-    description: "入口门控型标准面板，当前需要入口 Cookie、邮箱验证码和验证码校验。",
+    description: "入口门控型标准面板，当前要求入口 Cookie、邮箱验证码和验证码校验。",
     website: "https://web1.bby004.com",
     capabilities: {
       supportsStatusQuery: true,
@@ -31,7 +31,7 @@ module.exports = defineUpstreamModule({
         label: "入口地址",
         type: "url",
         placeholder: DEFAULT_ENTRY_URL,
-        description: "需先从入口页进入才能拿到访问 Cookie。",
+        description: "需要先从入口页放行，才能拿到访问 Cookie。",
       },
       {
         key: "officialSiteUrl",
@@ -45,7 +45,7 @@ module.exports = defineUpstreamModule({
         label: "API 候选",
         type: "textarea",
         placeholder: DEFAULT_API_HOSTS,
-        description: "每行一个 API 主机，程序会自动选可用入口。",
+        description: "每行一个 API 主机，程序会自动选择可用入口。",
       },
       {
         key: "accessCookie",
@@ -58,7 +58,7 @@ module.exports = defineUpstreamModule({
   },
   defaultConfig: {
     name: "宝贝云",
-    remark: "注册送 2 小时 5G",
+    remark: "注册送 2 小时 5G，当前要邮箱和验证码",
     runtimeMode: "always_refresh",
     trafficThresholdPercent: 20,
     maxRegistrationAgeMinutes: 120,

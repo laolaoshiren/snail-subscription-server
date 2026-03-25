@@ -7,6 +7,7 @@ const { webcrypto } = require("node:crypto");
 
 const { ensureProxyConfigured } = require("../../httpClient");
 const { buildClientUrls } = require("./snailApi");
+const { buildNumericCaptchaCandidatesFromDataUrl } = require("./numericCaptchaSolver");
 const {
   buildBrowserHeaders,
   buildUrl,
@@ -20,6 +21,11 @@ const {
 
 const cryptoApi = globalThis.crypto || webcrypto;
 const FETCH_TIMEOUT_MS = Number.parseInt(process.env.FETCH_TIMEOUT_MS || "15000", 10);
+const TOPMAN_CAPTCHA_MAX_ATTEMPTS = Number.parseInt(
+  process.env.TOPMAN_CAPTCHA_MAX_ATTEMPTS || "6",
+  10,
+);
+const TOPMAN_CAPTCHA_TYPE = "register";
 
 function bufferToBase64(buffer) {
   return Buffer.from(buffer).toString("base64");
@@ -93,12 +99,81 @@ async function buildTopmanHashedPath(pathname, password) {
 function normalizeTopmanResponse(payload, response) {
   const body = payload && typeof payload === "object" ? payload : {};
   const message = normalizeString(body.message || body.error || response.statusText);
+  const code = Number(body.code);
+  const explicitSuccess = Number.isFinite(code) ? code === 200 : true;
+
   return {
-    success: response.ok && (body.code === undefined || body.code === 200),
+    success: response.ok && explicitSuccess,
     message,
     data: body.data ?? body.payload ?? null,
     raw: body,
   };
+}
+
+function normalizeTopmanCaptchaImage(captchaPayload) {
+  if (typeof captchaPayload === "string") {
+    return normalizeString(captchaPayload);
+  }
+
+  if (!captchaPayload || typeof captchaPayload !== "object") {
+    return "";
+  }
+
+  return normalizeString(
+    captchaPayload.data
+      || captchaPayload.image
+      || captchaPayload.captcha
+      || captchaPayload.base64,
+  );
+}
+
+function normalizeTopmanCaptchaPayload(captchaPayload, type = TOPMAN_CAPTCHA_TYPE) {
+  if (typeof captchaPayload === "string") {
+    return {
+      data: normalizeString(captchaPayload),
+      type,
+      timestamp: null,
+      hash: "",
+    };
+  }
+
+  if (!captchaPayload || typeof captchaPayload !== "object") {
+    return {
+      data: "",
+      type,
+      timestamp: null,
+      hash: "",
+    };
+  }
+
+  return {
+    data: normalizeTopmanCaptchaImage(captchaPayload),
+    type: normalizeString(captchaPayload.type) || type,
+    timestamp: Number(captchaPayload.timestamp ?? captchaPayload.ts ?? 0) || null,
+    hash: normalizeString(captchaPayload.hash || captchaPayload.sign || captchaPayload.signature),
+  };
+}
+
+function buildTopmanCaptchaChallenge(captchaPayload, code) {
+  const normalizedCode = normalizeString(code);
+  if (!normalizedCode) {
+    return null;
+  }
+
+  return {
+    code: normalizedCode,
+    type: captchaPayload.type || TOPMAN_CAPTCHA_TYPE,
+    ...(captchaPayload.timestamp ? { timestamp: captchaPayload.timestamp } : {}),
+    ...(captchaPayload.hash ? { hash: captchaPayload.hash } : {}),
+  };
+}
+
+function isTopmanCaptchaErrorMessage(message) {
+  const normalized = normalizeString(message).toLowerCase();
+  return normalized.includes("captcha")
+    || normalized.includes("验证码")
+    || normalized.includes("缺少验证码")
+    || normalized.includes("verify");
 }
 
 async function requestTopmanApi(config, endpoint, options = {}) {
@@ -146,9 +221,9 @@ async function requestTopmanApi(config, endpoint, options = {}) {
     body,
     signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
   });
+
   const raw = await response.text();
   let decoded = raw;
-
   if (
     securityPassword
     && response.headers.get("x-encrypt-response")
@@ -162,13 +237,13 @@ async function requestTopmanApi(config, endpoint, options = {}) {
     try {
       payload = JSON.parse(decoded);
     } catch (error) {
-      throw new Error(`${config.label} 返回了无法解析的 JSON 响应。`);
+      throw new Error(`${config.label} returned invalid JSON.`);
     }
   }
 
   const normalized = normalizeTopmanResponse(payload, response);
   if (!normalized.success) {
-    throw new Error(normalized.message || `${config.label} 请求失败，状态码 ${response.status}。`);
+    throw new Error(normalized.message || `${config.label} request failed with status ${response.status}.`);
   }
 
   return normalized;
@@ -179,11 +254,54 @@ async function fetchTopmanGuestConfig(config) {
   return result.data || {};
 }
 
-async function fetchTopmanQuickCaptcha(config, type = "register") {
+async function fetchTopmanQuickCaptcha(config, type = TOPMAN_CAPTCHA_TYPE) {
   const result = await requestTopmanApi(config, "/api/v1/r8d/quick/captcha", {
     query: { type },
   });
-  return result.data || null;
+  return normalizeTopmanCaptchaPayload(result.raw, type);
+}
+
+async function resolveTopmanCaptchaChallenges(config, explicitCaptchaText = "") {
+  const normalizedCaptchaText = normalizeString(explicitCaptchaText);
+  const quickCaptcha = await fetchTopmanQuickCaptcha(config).catch(() => null);
+  const captchaPayload = normalizeTopmanCaptchaPayload(quickCaptcha);
+  const candidateCodes = [];
+
+  if (normalizedCaptchaText) {
+    candidateCodes.push(normalizedCaptchaText);
+  } else if (captchaPayload.data) {
+    const solved = await buildNumericCaptchaCandidatesFromDataUrl(captchaPayload.data).catch(() => null);
+    if (Array.isArray(solved?.candidates) && solved.candidates.length > 0) {
+      candidateCodes.push(...solved.candidates);
+    } else if (solved?.primary) {
+      candidateCodes.push(solved.primary);
+    }
+  }
+
+  return Array.from(new Set(candidateCodes
+    .map((candidate) => normalizeString(candidate))
+    .filter(Boolean)))
+    .map((candidate) => buildTopmanCaptchaChallenge(captchaPayload, candidate))
+    .filter(Boolean);
+}
+
+async function performTopmanRegister(config, payload) {
+  return requestTopmanApi(config, "/api/v1/passport/auth/register", {
+    method: "POST",
+    body: payload,
+  });
+}
+
+async function loginTopmanAccount(config, email, password) {
+  const loginPayload = await requestTopmanApi(config, "/api/v1/passport/auth/login", {
+    method: "POST",
+    body: {
+      email,
+      password,
+    },
+  });
+
+  return normalizeString(loginPayload?.data?.auth_data || loginPayload?.data?.token);
 }
 
 async function registerTopmanAccount(options = {}) {
@@ -199,15 +317,10 @@ async function registerTopmanAccount(options = {}) {
 
   const guestConfig = await fetchTopmanGuestConfig(config);
   if (guestConfig?.is_email_verify) {
-    throw new Error(`${config.label} 当前要求邮箱验证码，未接入邮箱收信能力前无法自动注册。`);
+    throw new Error(`${config.label} 当前要求邮箱验证码，暂时无法自动注册。`);
   }
   if (guestConfig?.is_recaptcha) {
-    throw new Error(`${config.label} 当前要求验证码校验，未接入验证码求解前无法自动注册。`);
-  }
-
-  const quickCaptcha = await fetchTopmanQuickCaptcha(config).catch(() => null);
-  if (quickCaptcha?.data && normalizeString(options.captchaText) === "") {
-    throw new Error(`${config.label} 当前要求站内验证码，未接入验证码求解前无法自动注册。`);
+    throw new Error(`${config.label} 当前要求 reCAPTCHA，暂时无法自动注册。`);
   }
 
   const email = normalizeString(options.email)
@@ -218,39 +331,60 @@ async function registerTopmanAccount(options = {}) {
     });
   const password = normalizeString(options.password) || generateRandomPassword();
   const inviteCode = normalizeString(options.inviteCode);
-  const registerBody = {
-    email,
-    password,
-    ...(inviteCode ? { invite_code: inviteCode } : {}),
-    ...(normalizeString(options.captchaText) ? { captcha: normalizeString(options.captchaText) } : {}),
-  };
-  let registerPayload;
-  try {
-    registerPayload = await requestTopmanApi(config, "/api/v1/passport/auth/register", {
-      method: "POST",
-      body: registerBody,
-    });
-  } catch (error) {
-    if ((error?.message || "").includes("验证码")) {
-      throw new Error(`${config.label} 当前要求站内验证码，未接入验证码求解前无法自动注册。`);
+  const explicitCaptchaText = normalizeString(options.captchaText);
+
+  let registerPayload = null;
+  let rounds = 0;
+  let lastCaptchaError = null;
+
+  while (!registerPayload && rounds < (explicitCaptchaText ? 1 : TOPMAN_CAPTCHA_MAX_ATTEMPTS)) {
+    const challenges = (await resolveTopmanCaptchaChallenges(config, explicitCaptchaText)).slice(0, 36);
+    rounds += 1;
+    if (challenges.length === 0) {
+      break;
     }
-    throw error;
+
+    for (const captchaChallenge of challenges) {
+      try {
+        registerPayload = await performTopmanRegister(config, {
+          email,
+          email_code: "",
+          password,
+          ...(inviteCode ? { invite_code: inviteCode } : {}),
+          captcha: captchaChallenge,
+        });
+        break;
+      } catch (error) {
+        if (!isTopmanCaptchaErrorMessage(error?.message || "")) {
+          throw error;
+        }
+
+        lastCaptchaError = error;
+        if (explicitCaptchaText) {
+          throw new Error(`${config.label} 验证码不正确。`);
+        }
+      }
+    }
+
+    if (explicitCaptchaText) {
+      break;
+    }
+  }
+
+  if (!registerPayload) {
+    throw new Error(
+      lastCaptchaError?.message
+        ? `${config.label} 验证码多次重试后仍然失败：${lastCaptchaError.message}`
+        : `${config.label} 未能完成注册。`,
+    );
   }
 
   let authToken = normalizeString(registerPayload?.data?.auth_data || registerPayload?.data?.token);
   if (!authToken) {
-    const loginPayload = await requestTopmanApi(config, "/api/v1/passport/auth/login", {
-      method: "POST",
-      body: {
-        email,
-        password,
-      },
-    });
-    authToken = normalizeString(loginPayload?.data?.auth_data || loginPayload?.data?.token);
+    authToken = await loginTopmanAccount(config, email, password);
   }
-
   if (!authToken) {
-    throw new Error(`${config.label} 未返回授权令牌。`);
+    throw new Error(`${config.label} did not return an auth token.`);
   }
 
   const authHeaders = {
@@ -264,7 +398,7 @@ async function registerTopmanAccount(options = {}) {
   const infoData = infoPayload.data || {};
   const subscribeUrl = normalizeString(subscribeData.subscribe_url);
   if (!subscribeUrl) {
-    throw new Error(`${config.label} 未返回订阅地址。`);
+    throw new Error(`${config.label} did not return a subscription URL.`);
   }
 
   return {

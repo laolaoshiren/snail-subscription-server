@@ -15,7 +15,7 @@ module.exports = defineUpstreamModule({
   manifest: {
     id: "topman",
     label: "拓扑门",
-    description: "Buddy 主题 + 加密 API 面板，当前注册时要求站内验证码。",
+    description: "Buddy 主题加密面板，注册时带 4 位站内验证码。",
     website: "https://jooy.cc",
     capabilities: {
       supportsStatusQuery: true,
@@ -34,7 +34,7 @@ module.exports = defineUpstreamModule({
         label: "站点地址",
         type: "url",
         placeholder: DEFAULT_SITE_URL,
-        description: "用于 Origin / Referer 的面板站点。",
+        description: "用于 Origin / Referer 的前端地址。",
       },
       {
         key: "apiBase",
@@ -45,23 +45,23 @@ module.exports = defineUpstreamModule({
       },
       {
         key: "securityPassword",
-        label: "加密密码",
+        label: "加密口令",
         type: "text",
         placeholder: DEFAULT_SECURITY_PASSWORD,
-        description: "前端 config.js 中的 API 加密密码。",
+        description: "前端 config.js 里的 API 加密口令。",
       },
       {
         key: "encryptResponse",
         label: "加密响应",
         type: "checkbox",
-        description: "启用后按站点加密逻辑自动解密响应。",
+        description: "按站点逻辑自动解密响应内容。",
         defaultValue: true,
       },
     ],
   },
   defaultConfig: {
     name: "拓扑门",
-    remark: "免费计划，可自动识别配置",
+    remark: "免费计划，带站内图形验证码",
     runtimeMode: "always_refresh",
     trafficThresholdPercent: 20,
     maxRegistrationAgeMinutes: 120,

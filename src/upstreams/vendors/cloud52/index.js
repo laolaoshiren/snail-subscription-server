@@ -1,6 +1,10 @@
 "use strict";
 
 const { defineUpstreamModule } = require("../../core/moduleContract");
+const {
+  queryCloud52Account,
+  registerCloud52Account,
+} = require("../../shared/cloud52Api");
 
 const DEFAULT_ENTRY_URL = "https://v1.v52x.cc/#/register?code=EjHD";
 const DEFAULT_SITE_URL = "https://v1.v52x.cc";
@@ -10,10 +14,10 @@ module.exports = defineUpstreamModule({
   manifest: {
     id: "cloud52",
     label: "52Cloud",
-    description: "自定义加密 API 面板，当前注册时要求 GeeTest 滑块验证码。",
+    description: "加密面板，当前注册页启用了 GeeTest 滑块验证。",
     website: "https://v1.v52x.cc",
     capabilities: {
-      supportsStatusQuery: false,
+      supportsStatusQuery: true,
       supportsInviteCode: true,
     },
     settingFields: [
@@ -22,27 +26,27 @@ module.exports = defineUpstreamModule({
         label: "入口地址",
         type: "url",
         placeholder: DEFAULT_ENTRY_URL,
-        description: "注册入口地址。",
+        description: "52Cloud 注册入口地址。",
       },
       {
         key: "officialSiteUrl",
         label: "站点地址",
         type: "url",
         placeholder: DEFAULT_SITE_URL,
-        description: "52Cloud 前端面板地址。",
+        description: "用于 Origin / Referer 的前端地址。",
       },
       {
         key: "apiBase",
         label: "API 地址",
         type: "url",
         placeholder: DEFAULT_API_BASE,
-        description: "52Cloud 后端 API 地址。",
+        description: "52Cloud 加密 API 根地址。",
       },
     ],
   },
   defaultConfig: {
     name: "52Cloud",
-    remark: "兑换码 52one",
+    remark: "兑换码 52one，当前有 GeeTest",
     runtimeMode: "always_refresh",
     trafficThresholdPercent: 20,
     maxRegistrationAgeMinutes: 120,
@@ -63,8 +67,26 @@ module.exports = defineUpstreamModule({
   },
   async register(context = {}) {
     const upstreamConfig = context.upstreamConfig;
-    throw new Error(
-      `${upstreamConfig.name || "52Cloud"} 当前启用了 GeeTest 滑块验证，未接入验证码求解前无法自动注册。`,
-    );
+    return registerCloud52Account({
+      label: "52Cloud",
+      inviteCode: context.inviteCode || upstreamConfig.inviteCode,
+      entryUrl: upstreamConfig.settings.entryUrl,
+      officialSiteUrl: upstreamConfig.settings.officialSiteUrl,
+      apiBase: upstreamConfig.settings.apiBase,
+      upstreamSource: "cloud52",
+    });
+  },
+  async query(context = {}) {
+    const upstreamConfig = context.upstreamConfig;
+    const record = context.record || {};
+    return queryCloud52Account({
+      label: "52Cloud",
+      token: record.token,
+      email: record.email,
+      entryUrl: record.entryUrl || upstreamConfig.settings.entryUrl,
+      officialSiteUrl: record.upstreamSite || upstreamConfig.settings.officialSiteUrl,
+      apiBase: record.apiBase || upstreamConfig.settings.apiBase,
+      upstreamSource: "cloud52",
+    });
   },
 });

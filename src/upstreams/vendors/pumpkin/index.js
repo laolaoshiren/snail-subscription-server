@@ -14,7 +14,7 @@ module.exports = defineUpstreamModule({
   manifest: {
     id: "pumpkin",
     label: "Pumpkin",
-    description: "标准 API 面板，当前注册时要求 Google reCAPTCHA。",
+    description: "标准 API 面板，当前注册页要求 Google reCAPTCHA。",
     website: "https://pumpkin369.cc",
     capabilities: {
       supportsStatusQuery: true,
@@ -33,7 +33,7 @@ module.exports = defineUpstreamModule({
         label: "站点地址",
         type: "url",
         placeholder: DEFAULT_SITE_URL,
-        description: "用于 Origin / Referer 的面板站点。",
+        description: "用于 Origin / Referer 的面板地址。",
       },
       {
         key: "apiBase",
@@ -46,7 +46,7 @@ module.exports = defineUpstreamModule({
   },
   defaultConfig: {
     name: "Pumpkin",
-    remark: "新用户 7 天试用",
+    remark: "新用户 7 天试用，当前有 reCAPTCHA",
     runtimeMode: "always_refresh",
     trafficThresholdPercent: 20,
     maxRegistrationAgeMinutes: 120,

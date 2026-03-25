@@ -70,13 +70,13 @@ async function requestStandardV2Api(config, endpoint, options = {}) {
     try {
       payload = JSON.parse(raw);
     } catch (error) {
-      throw new Error(`${config.label} 返回了无法解析的 JSON 响应。`);
+      throw new Error(`${config.label} returned invalid JSON.`);
     }
   }
 
   const normalized = normalizeApiResponse(payload, response);
   if (!normalized.success) {
-    throw new Error(normalized.message || `${config.label} 请求失败，状态码 ${response.status}。`);
+    throw new Error(normalized.message || `${config.label} request failed with status ${response.status}.`);
   }
 
   return normalized;
@@ -91,11 +91,11 @@ async function fetchStandardGuestConfig(config, options = {}) {
 
 function assertStandardAutoRegisterSupported(config, guestConfig) {
   if (guestConfig?.is_email_verify) {
-    throw new Error(`${config.label} 当前要求邮箱验证码，未接入邮箱收信能力前无法自动注册。`);
+    throw new Error(`${config.label} 当前要求邮箱验证码，暂时无法自动注册。`);
   }
 
   if (guestConfig?.is_recaptcha) {
-    throw new Error(`${config.label} 当前要求验证码校验，未接入验证码求解前无法自动注册。`);
+    throw new Error(`${config.label} 当前要求验证码校验，暂时无法自动注册。`);
   }
 }
 
@@ -153,7 +153,7 @@ async function registerStandardV2Account(options = {}) {
   }
 
   if (!authToken) {
-    throw new Error(`${config.label} 未返回授权令牌。`);
+    throw new Error(`${config.label} did not return an auth token.`);
   }
 
   const authHeaders = {
@@ -166,7 +166,7 @@ async function registerStandardV2Account(options = {}) {
   const subscribeData = subscribePayload.data || {};
   const subscribeUrl = normalizeString(subscribeData.subscribe_url);
   if (!subscribeUrl) {
-    throw new Error(`${config.label} 未返回订阅地址。`);
+    throw new Error(`${config.label} did not return a subscription URL.`);
   }
 
   const infoPayload = await requestStandardV2Api(config, "/user/info", {
@@ -202,24 +202,22 @@ async function queryStandardV2Account(options = {}) {
   if (!authToken) {
     throw new Error(`Missing ${config.label} auth token.`);
   }
-
   const requestHeaders = options.requestHeaders && typeof options.requestHeaders === "object"
     ? options.requestHeaders
     : {};
-  const authHeaders = {
+  const headers = {
     ...requestHeaders,
     Authorization: authToken,
   };
-  const [subscribePayload, infoPayload, statPayload] = await Promise.all([
-    requestStandardV2Api(config, "/user/getSubscribe", { headers: authHeaders }),
-    requestStandardV2Api(config, "/user/info", { headers: authHeaders }),
-    requestStandardV2Api(config, "/user/getStat", { headers: authHeaders }).catch(() =>
-      requestStandardV2Api(config, "/user/stat/getTrafficLog", { headers: authHeaders }).catch(() => null)),
+
+  const [subscribePayload, infoPayload, trafficPayload] = await Promise.all([
+    requestStandardV2Api(config, "/user/getSubscribe", { headers }),
+    requestStandardV2Api(config, "/user/info", { headers }),
+    requestStandardV2Api(config, "/user/stat/getTrafficLog", { headers }).catch(() => ({ data: null })),
   ]);
 
-  const subscribeData = subscribePayload?.data || {};
-  const infoData = infoPayload?.data || {};
-  const statData = statPayload?.data ?? null;
+  const subscribeData = subscribePayload.data || {};
+  const infoData = infoPayload.data || {};
   const usedUpload = Number(subscribeData.u || 0) || 0;
   const usedDownload = Number(subscribeData.d || 0) || 0;
   const transferEnable = Number(subscribeData.transfer_enable ?? infoData.transfer_enable ?? 0) || 0;
@@ -245,7 +243,7 @@ async function queryStandardV2Account(options = {}) {
     remainingTraffic,
     remainingPercent: transferEnable > 0 ? Number(((remainingTraffic / transferEnable) * 100).toFixed(2)) : 0,
     usagePercent: transferEnable > 0 ? Number(((usedTotal / transferEnable) * 100).toFixed(2)) : 0,
-    stat: statData,
+    stat: trafficPayload?.data ?? null,
     upstreamSite: config.officialSiteUrl,
     apiBase: config.apiBase,
     entryUrl: config.entryUrl,
@@ -255,7 +253,6 @@ async function queryStandardV2Account(options = {}) {
 
 module.exports = {
   fetchStandardGuestConfig,
-  normalizeApiResponse,
   queryStandardV2Account,
   registerStandardV2Account,
   requestStandardV2Api,

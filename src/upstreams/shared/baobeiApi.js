@@ -70,7 +70,7 @@ async function resolveBaobeiApiBase(config) {
     }
   }
 
-  throw lastError || new Error(`${config.label} 未找到可用的 API 入口。`);
+  throw lastError || new Error(`${config.label} 没有找到可用的 API 入口。`);
 }
 
 async function registerBaobeiAccount(options = {}) {

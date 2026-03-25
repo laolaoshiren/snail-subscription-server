@@ -13,7 +13,9 @@
   },
   "dependencies": {
     "js-yaml": "^4.1.1",
+    "pngjs": "^7.0.0",
     "qrcode": "^1.5.4",
+    "tesseract.js": "^6.0.1",
     "undici": "^7.16.0"
   }
 }
