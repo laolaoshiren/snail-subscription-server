@@ -575,6 +575,11 @@ function renderAggregateSummary(counts = collectAggregateCountsFromForm()) {
   setText(aggregateSummary, `${selectionLabel} · ${getAggregateTimeoutSeconds()} 秒超时`);
 }
 
+function getAggregateConfigSummary(counts = state.upstreamAggregation?.counts || {}) {
+  const selectionLabel = getAggregateSelectionLabel(counts) || "点击配置聚合上游";
+  return `${selectionLabel} · ${getAggregateTimeoutSeconds()} 秒`;
+}
+
 function getRuntimeSelectionLabel(upstream = getActiveUpstream()) {
   if (isAggregateMode()) {
     return "聚合模式";
@@ -797,7 +802,7 @@ function renderUpstreamList() {
   aggregateItem.innerHTML = `
     <span class="upstream-list-item__body">
       <strong>聚合模式</strong>
-      <small>${getAggregateSelectionLabel() || "点击配置聚合上游"}</small>
+      <small>${getAggregateConfigSummary()}</small>
     </span>
     <span class="upstream-list-item__badge">${isAggregateMode() ? "运行中" : "配置"}</span>
   `;
@@ -2150,7 +2155,7 @@ if (aggregateForm) {
       });
 
       await refreshSession();
-      setStatus(`聚合配置已保存：${getAggregateSelectionLabel() || "未选择上游"}。`, "success");
+      setStatus(`聚合配置已保存：${getAggregateConfigSummary(counts)}。`, "success");
     } catch (error) {
       if (error.status === 401) {
         showLogin();
