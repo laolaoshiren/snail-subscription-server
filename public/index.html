@@ -286,6 +286,11 @@
                         <strong id="aggregateSummary">未选择上游</strong>
                       </div>
 
+                      <label class="aggregate-timeout-field">
+                        <span>聚合超时（秒）</span>
+                        <input id="aggregateTimeoutSeconds" name="aggregateTimeoutSeconds" type="number" min="1" max="120" step="1" value="15" />
+                      </label>
+
                       <div id="aggregateList" class="aggregate-list"></div>
 
                       <div class="inline-actions">

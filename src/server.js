@@ -11,6 +11,7 @@ const yaml = require("js-yaml");
 const { ensureProxyConfigured } = require("./httpClient");
 const {
   ACTIVE_UPSTREAM_MODES,
+  DEFAULT_AGGREGATE_TIMEOUT_SECONDS,
   DEFAULT_PASSWORD,
   DEFAULT_USER_KEY,
   RELAY_USERS,
@@ -23,6 +24,7 @@ const {
   isDefaultPasswordActive,
   listRelayUsers,
   listUpstreamConfigs,
+  normalizeAggregateTimeoutSeconds,
   normalizeUserKey,
   resolveRelayUserByToken,
   updatePanelSettings,
@@ -53,6 +55,7 @@ const { loadAggregateClashTemplate } = require("./aggregateClashTemplate");
 const { mergeSubscriptionBodies } = require("./subscriptionMerger");
 const { URL_TYPES } = require("./upstreams/shared/snailApi");
 const {
+  getRuntimeAggregateTargets,
   getRuntimeCandidateUpstreamIds,
   manualRegisterAggregateWithRuntime,
   manualRegisterWithRuntime,
@@ -1339,15 +1342,28 @@ async function readJsonBody(request) {
   }
 }
 
-async function fetchUpstreamSubscription(upstreamUrl) {
+function normalizeRequestTimeoutMs(timeoutMs, fallbackMs = RELAY_FETCH_TIMEOUT_MS) {
+  const parsed = Number.parseInt(timeoutMs, 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return fallbackMs;
+  }
+
+  return Math.max(1, Math.min(parsed, fallbackMs));
+}
+
+async function fetchUpstreamSubscription(upstreamUrl, timeoutMs = RELAY_FETCH_TIMEOUT_MS) {
   ensureProxyConfigured();
 
   return fetch(upstreamUrl, {
-    signal: AbortSignal.timeout(RELAY_FETCH_TIMEOUT_MS),
+    signal: AbortSignal.timeout(normalizeRequestTimeoutMs(timeoutMs)),
   });
 }
 
-async function fetchFallbackSubscriptionUserInfoHeader(clientUrls, requestedType) {
+async function fetchFallbackSubscriptionUserInfoHeader(
+  clientUrls,
+  requestedType,
+  timeoutMs = RELAY_FETCH_TIMEOUT_MS,
+) {
   if (!clientUrls || requestedType === "clash") {
     return "";
   }
@@ -1359,7 +1375,7 @@ async function fetchFallbackSubscriptionUserInfoHeader(clientUrls, requestedType
   }
 
   try {
-    const fallbackResponse = await fetchUpstreamSubscription(clashUrl);
+    const fallbackResponse = await fetchUpstreamSubscription(clashUrl, timeoutMs);
     const fallbackHeader = (fallbackResponse.headers.get("subscription-userinfo") || "").trim();
 
     if (fallbackResponse.body && typeof fallbackResponse.body.cancel === "function") {
@@ -1689,6 +1705,132 @@ function getAggregateRuntimeIntervalMinutes(targets = []) {
   return Math.min(...values);
 }
 
+function getAggregateTimeoutSeconds(upstreamAggregation = {}) {
+  return normalizeAggregateTimeoutSeconds(
+    upstreamAggregation?.timeoutSeconds,
+    DEFAULT_AGGREGATE_TIMEOUT_SECONDS,
+  );
+}
+
+function getAggregateTimeoutMs(upstreamAggregation = {}) {
+  return getAggregateTimeoutSeconds(upstreamAggregation) * 1000;
+}
+
+function buildAggregateExecutionKey(target = {}) {
+  return target.storageKey || `${target.upstreamId || "upstream"}:${target.instanceNumber || 1}`;
+}
+
+function normalizeAggregateExecutionError(error) {
+  if (error instanceof Error) {
+    return error;
+  }
+
+  return new Error(`${error || "Unknown error."}`);
+}
+
+function createAggregateRequestTimeoutError(timeoutSeconds) {
+  const error = new Error(`聚合请求超过 ${timeoutSeconds} 秒，已跳过该实例。`);
+  error.code = "AGGREGATE_TIMEOUT";
+  return error;
+}
+
+async function collectAggregateExecutionResults(targets, executor, options = {}) {
+  const orderedTargets = Array.isArray(targets) ? targets : [];
+  const timeoutSeconds = getAggregateTimeoutSeconds({
+    timeoutSeconds: options.timeoutSeconds,
+  });
+  const timeoutMs =
+    Number.isFinite(options.timeoutMs) && options.timeoutMs > 0
+      ? options.timeoutMs
+      : timeoutSeconds * 1000;
+  const deadlineAt =
+    Number.isFinite(options.deadlineAt) && options.deadlineAt > 0
+      ? options.deadlineAt
+      : Date.now() + timeoutMs;
+  const successMap = new Map();
+  const failureMap = new Map();
+  const pendingEntries = new Map();
+
+  orderedTargets.forEach((target) => {
+    let wrappedPromise = null;
+    wrappedPromise = Promise.resolve()
+      .then(() => executor(target))
+      .then(
+        (value) => ({
+          wrappedPromise,
+          target,
+          status: "fulfilled",
+          value,
+        }),
+        (error) => ({
+          wrappedPromise,
+          target,
+          status: "rejected",
+          error: normalizeAggregateExecutionError(error),
+        }),
+      );
+    pendingEntries.set(wrappedPromise, target);
+  });
+
+  while (pendingEntries.size > 0) {
+    const pendingPromises = Array.from(pendingEntries.keys());
+    if (pendingPromises.length === 0) {
+      break;
+    }
+
+    const remainingMs = deadlineAt - Date.now();
+    if (remainingMs <= 0) {
+      break;
+    }
+
+    const outcome = await Promise.race([
+      ...pendingPromises,
+      new Promise((resolve) => {
+        setTimeout(() => resolve(null), remainingMs);
+      }),
+    ]);
+
+    if (!outcome) {
+      break;
+    }
+
+    pendingEntries.delete(outcome.wrappedPromise);
+
+    if (outcome.status === "fulfilled") {
+      successMap.set(buildAggregateExecutionKey(outcome.target), {
+        ...outcome.target,
+        ...outcome.value,
+      });
+      continue;
+    }
+
+    failureMap.set(buildAggregateExecutionKey(outcome.target), {
+      ...outcome.target,
+      error: outcome.error,
+    });
+  }
+
+  if (pendingEntries.size > 0) {
+    pendingEntries.forEach((target) => {
+      failureMap.set(buildAggregateExecutionKey(target), {
+        ...target,
+        error: createAggregateRequestTimeoutError(timeoutSeconds),
+      });
+    });
+  }
+
+  return {
+    targets: orderedTargets
+      .map((target) => successMap.get(buildAggregateExecutionKey(target)))
+      .filter(Boolean),
+    failures: orderedTargets
+      .map((target) => failureMap.get(buildAggregateExecutionKey(target)))
+      .filter(Boolean),
+    timedOut: pendingEntries.size > 0,
+    deadlineAt,
+  };
+}
+
 function getAggregateSupportedTypes(upstreams, targets = []) {
   const supportedTypes = new Set();
 
@@ -1978,7 +2120,7 @@ async function probeUpstreamSubscription(record, supportedTypes = []) {
   };
 }
 
-async function fetchResolvedSubscriptionSource(source, type, requestMethod = "GET") {
+async function fetchResolvedSubscriptionSource(source, type, requestMethod = "GET", options = {}) {
   const latest = source?.userState?.latestRegistration;
   if (!latest) {
     throw new Error("No latest registration is available.");
@@ -1993,6 +2135,19 @@ async function fetchResolvedSubscriptionSource(source, type, requestMethod = "GE
     source?.upstreamConfig?.subscriptionUpdateIntervalMinutes,
   );
   const profileUpdateIntervalHours = toProfileUpdateIntervalHours(subscriptionUpdateIntervalMinutes);
+  const hasDeadline = Number.isFinite(options.deadlineAt) && options.deadlineAt > 0;
+  const deadlineTimeoutMs = hasDeadline ? options.deadlineAt - Date.now() : 0;
+  if (hasDeadline && deadlineTimeoutMs <= 0) {
+    throw createAggregateRequestTimeoutError(
+      getAggregateTimeoutSeconds({
+        timeoutSeconds: options.timeoutSeconds,
+      }),
+    );
+  }
+
+  const requestTimeoutMs = hasDeadline
+    ? normalizeRequestTimeoutMs(deadlineTimeoutMs, RELAY_FETCH_TIMEOUT_MS)
+    : normalizeRequestTimeoutMs(options.timeoutMs, RELAY_FETCH_TIMEOUT_MS);
 
   if (latest.mock) {
     return {
@@ -2016,7 +2171,7 @@ async function fetchResolvedSubscriptionSource(source, type, requestMethod = "GE
     };
   }
 
-  const upstreamResponse = await fetchUpstreamSubscription(upstreamUrl);
+  const upstreamResponse = await fetchUpstreamSubscription(upstreamUrl, requestTimeoutMs);
   if (!upstreamResponse.ok) {
     const nextError = new Error(
       `Upstream subscription request failed with status ${upstreamResponse.status}.`,
@@ -2037,6 +2192,7 @@ async function fetchResolvedSubscriptionSource(source, type, requestMethod = "GE
     const fallbackUserInfoHeader = await fetchFallbackSubscriptionUserInfoHeader(
       latest?.clientUrls,
       type,
+      requestTimeoutMs,
     );
     if (fallbackUserInfoHeader) {
       headers["subscription-userinfo"] = fallbackUserInfoHeader;
@@ -2058,6 +2214,148 @@ async function fetchResolvedSubscriptionSource(source, type, requestMethod = "GE
     headers,
     body,
   };
+}
+
+async function proxyAggregateSubscription(response, request, type, relayUser, runtime) {
+  const aggregateTimeoutMs = getAggregateTimeoutMs(runtime?.upstreamAggregation);
+  const aggregateTimeoutSeconds = getAggregateTimeoutSeconds(runtime?.upstreamAggregation);
+  const deadlineAt = Date.now() + aggregateTimeoutMs;
+  const aggregateTargets = await getRuntimeAggregateTargets(type);
+  const aggregateResult = await collectAggregateExecutionResults(
+    aggregateTargets,
+    async (target) => {
+      let resolvedState = null;
+
+      try {
+        resolvedState = await resolveRelayState(relayUser.key, target.upstreamId, type, target);
+        const payload = await fetchResolvedSubscriptionSource(
+          {
+            ...target,
+            ...resolvedState,
+          },
+          type,
+          request.method,
+          {
+            deadlineAt,
+            timeoutSeconds: aggregateTimeoutSeconds,
+          },
+        );
+
+        await appendUserHistory(relayUser.key, target.storageKey || target.upstreamId, {
+          action: "relay_success",
+          title: "聚合订阅已成功返回",
+          message: `客户端成功拉取 ${type} 聚合订阅。`,
+          mode: ACTIVE_UPSTREAM_MODES.AGGREGATE,
+          relayType: type,
+          requestSource: "relay",
+          registration: resolvedState?.userState?.latestRegistration || null,
+          usage: resolvedState?.userState?.latestUsage || null,
+          details: {
+            aggregate: true,
+            instanceLabel: target.instanceLabel || target.upstreamId,
+            storageKey: target.storageKey || target.upstreamId,
+          },
+        });
+
+        return {
+          ...resolvedState,
+          payload,
+        };
+      } catch (error) {
+        const normalizedError = normalizeAggregateExecutionError(error);
+        if (resolvedState) {
+          normalizedError.aggregateTargetState = resolvedState;
+        }
+        throw normalizedError;
+      }
+    },
+    {
+      timeoutSeconds: aggregateTimeoutSeconds,
+      deadlineAt,
+    },
+  );
+
+  if (aggregateResult.targets.length === 0) {
+    sendText(response, 503, "No aggregate upstream is available.");
+    return;
+  }
+
+  const successfulFetches = aggregateResult.targets.map((entry) => ({
+    target: entry,
+    payload: entry.payload,
+  }));
+  const failedFetches = [...aggregateResult.failures];
+
+  failedFetches.forEach((failure) => {
+    appendUserHistory(relayUser.key, failure.storageKey || failure.upstreamId, {
+      action: "relay_failed",
+      title: "聚合订阅拉取失败",
+      message: failure.error?.message || "Unknown error.",
+      mode: ACTIVE_UPSTREAM_MODES.AGGREGATE,
+      relayType: type,
+      requestSource: "relay",
+      registration:
+        failure.error?.aggregateTargetState?.userState?.latestRegistration ||
+        failure?.userState?.latestRegistration ||
+        null,
+      usage:
+        failure.error?.aggregateTargetState?.userState?.latestUsage ||
+        failure?.userState?.latestUsage ||
+        null,
+      details: {
+        aggregate: true,
+        instanceLabel: failure.instanceLabel || failure.upstreamId,
+        storageKey: failure.storageKey || failure.upstreamId,
+      },
+    }).catch(() => undefined);
+  });
+
+  if (successfulFetches.length === 0) {
+    sendText(
+      response,
+      aggregateResult.timedOut ? 504 : 502,
+      `Aggregate subscription request failed: ${buildAggregateWarning(failedFetches) || `Aggregate timeout after ${aggregateTimeoutSeconds}s.`}`,
+    );
+    return;
+  }
+
+  const mergedIntervalHours = toProfileUpdateIntervalHours(
+    getAggregateRuntimeIntervalMinutes(successfulFetches.map((entry) => entry.target)),
+  );
+  const mergedHeaders = {
+    "content-type": getContentTypeByRelayType(
+      type,
+      successfulFetches[0]?.payload?.headers?.["content-type"] || "text/plain; charset=utf-8",
+    ),
+    "profile-title": `RelayHub Aggregate ${type}`,
+    "profile-update-interval": mergedIntervalHours,
+  };
+  const mergedUserInfo = pickAggregateSubscriptionUserInfoHeader(successfulFetches);
+  if (mergedUserInfo) {
+    mergedHeaders["subscription-userinfo"] = mergedUserInfo;
+  }
+
+  response.writeHead(200, mergedHeaders);
+  if (request.method === "HEAD") {
+    response.end();
+    return;
+  }
+
+  const clashTemplate = type === "clash" ? await loadAggregateClashTemplate() : null;
+  const mergedBody = sanitizeSubscriptionBody(
+    mergeSubscriptionBodies(
+      type,
+      successfulFetches.map((entry) => ({
+        body: entry.payload.body,
+        sourceLabel: entry.target.instanceLabel || entry.target.upstreamId,
+      })),
+      {
+        clashTemplate,
+      },
+    ),
+  );
+  validateSubscriptionPayload(type, mergedBody);
+  response.end(mergedBody);
 }
 
 async function buildAggregateResponse(request, userKey, type, targets, failures = [], warning = "") {
@@ -2591,7 +2889,9 @@ async function handleLatestSubscription(request, response, url) {
   }
 
   if (!url.searchParams.get("upstreamId") && runtime.activeUpstreamMode === ACTIVE_UPSTREAM_MODES.AGGREGATE) {
-    const result = await resolveAggregateViewStates(userKey, type === "full" ? "universal" : type);
+    const result = await resolveAggregateViewStates(userKey, type === "full" ? "universal" : type, {
+      timeoutSeconds: runtime.upstreamAggregation?.timeoutSeconds,
+    });
 
     sendJson(response, 200, {
       success: true,
@@ -2636,6 +2936,8 @@ async function proxySubscription(response, request, type, url) {
 
   const runtime = await getActiveUpstreamRuntime();
   if (runtime.activeUpstreamMode === ACTIVE_UPSTREAM_MODES.AGGREGATE) {
+    await proxyAggregateSubscription(response, request, type, relayUser, runtime);
+    return;
     const aggregateResult = await resolveAggregateRelayStates(relayUser.key, type);
     if (aggregateResult.targets.length === 0) {
       sendText(response, 503, "No aggregate upstream is available.");

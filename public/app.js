@@ -24,6 +24,7 @@ const aggregateDetailView = document.querySelector("#aggregateDetailView");
 const aggregateForm = document.querySelector("#aggregateForm");
 const aggregateList = document.querySelector("#aggregateList");
 const aggregateSummary = document.querySelector("#aggregateSummary");
+const aggregateTimeoutSecondsInput = document.querySelector("#aggregateTimeoutSeconds");
 const saveAggregateButton = document.querySelector("#saveAggregateButton");
 
 const statusBar = document.querySelector("#statusBar");
@@ -130,6 +131,7 @@ const state = {
   activeUpstreamMode: ACTIVE_UPSTREAM_MODES.SINGLE,
   upstreamAggregation: {
     counts: {},
+    timeoutSeconds: 15,
   },
   selectedUpstreamId: "",
   currentTab: "subscription",
@@ -514,6 +516,24 @@ function normalizeAggregateCopies(value, fallback = 0) {
   return Math.min(parsed, 10);
 }
 
+function normalizeAggregateTimeoutSeconds(value, fallback = 15) {
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return fallback;
+  }
+
+  return Math.min(parsed, 120);
+}
+
+function getAggregateTimeoutSeconds() {
+  const fallback = normalizeAggregateTimeoutSeconds(state.upstreamAggregation?.timeoutSeconds, 15);
+  if (!aggregateTimeoutSecondsInput) {
+    return fallback;
+  }
+
+  return normalizeAggregateTimeoutSeconds(aggregateTimeoutSecondsInput.value, fallback);
+}
+
 function getAggregateSelectionLabel(counts = state.upstreamAggregation?.counts || {}) {
   const labels = [];
 
@@ -551,7 +571,8 @@ function renderAggregateSummary(counts = collectAggregateCountsFromForm()) {
     return;
   }
 
-  setText(aggregateSummary, getAggregateSelectionLabel(counts) || "未选择上游");
+  const selectionLabel = getAggregateSelectionLabel(counts) || "未选择上游";
+  setText(aggregateSummary, `${selectionLabel} · ${getAggregateTimeoutSeconds()} 秒超时`);
 }
 
 function getRuntimeSelectionLabel(upstream = getActiveUpstream()) {
@@ -856,6 +877,10 @@ function renderUpstreamList() {
 function renderAggregateEditor() {
   if (!aggregateList) {
     return;
+  }
+
+  if (aggregateTimeoutSecondsInput) {
+    aggregateTimeoutSecondsInput.value = String(getAggregateTimeoutSeconds());
   }
 
   aggregateList.innerHTML = "";
@@ -1673,7 +1698,11 @@ function applySession(payload) {
   state.upstreamAggregation =
     payload.upstreamAggregation && typeof payload.upstreamAggregation === "object"
       ? payload.upstreamAggregation
-      : { counts: {} };
+      : { counts: {}, timeoutSeconds: 15 };
+  state.upstreamAggregation.timeoutSeconds = normalizeAggregateTimeoutSeconds(
+    state.upstreamAggregation.timeoutSeconds,
+    15,
+  );
   state.relayUrlsByUser = payload.relayUrlsByUser || {};
   state.userSummaries = Array.isArray(payload.userSummaries) ? payload.userSummaries : [];
   state.currentViewUpstream = null;
@@ -2094,12 +2123,20 @@ if (upstreamCloudForm) {
 }
 
 if (aggregateForm) {
+  aggregateTimeoutSecondsInput?.addEventListener("input", () => {
+    aggregateTimeoutSecondsInput.value = String(
+      normalizeAggregateTimeoutSeconds(aggregateTimeoutSecondsInput.value, 15),
+    );
+    renderAggregateSummary();
+  });
+
   aggregateForm.addEventListener("submit", async (event) => {
     event.preventDefault();
     clearStatus();
     setLoading(saveAggregateButton, "保存中...", true);
 
     const counts = collectAggregateCountsFromForm();
+    const timeoutSeconds = normalizeAggregateTimeoutSeconds(aggregateTimeoutSecondsInput?.value, 15);
 
     try {
       await requestJson("/api/settings", {
@@ -2107,6 +2144,7 @@ if (aggregateForm) {
         body: JSON.stringify({
           upstreamAggregation: {
             counts,
+            timeoutSeconds,
           },
         }),
       });

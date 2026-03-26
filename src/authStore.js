@@ -40,6 +40,8 @@ const ACTIVE_UPSTREAM_MODES = Object.freeze({
   AGGREGATE: "aggregate",
 });
 const MAX_AGGREGATE_COPIES = 10;
+const DEFAULT_AGGREGATE_TIMEOUT_SECONDS = 15;
+const MAX_AGGREGATE_TIMEOUT_SECONDS = 120;
 let securityStateMutationQueue = Promise.resolve();
 const DEFAULT_UPSTREAM_CLOUD = Object.freeze({
   enabled: true,
@@ -51,6 +53,7 @@ const DEFAULT_UPSTREAM_CLOUD = Object.freeze({
 });
 const DEFAULT_UPSTREAM_AGGREGATION = Object.freeze({
   counts: {},
+  timeoutSeconds: DEFAULT_AGGREGATE_TIMEOUT_SECONDS,
 });
 
 function hashPassword(password, salt) {
@@ -155,6 +158,15 @@ function normalizeAggregateCopyCount(value) {
   return Math.min(MAX_AGGREGATE_COPIES, parsed);
 }
 
+function normalizeAggregateTimeoutSeconds(value, fallback = DEFAULT_AGGREGATE_TIMEOUT_SECONDS) {
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return fallback;
+  }
+
+  return Math.min(MAX_AGGREGATE_TIMEOUT_SECONDS, parsed);
+}
+
 function normalizeUpstreamConfigs(rawUpstreams, legacyRuntimeMode) {
   const source = rawUpstreams && typeof rawUpstreams === "object" ? rawUpstreams : {};
   const result = {};
@@ -243,6 +255,10 @@ function resolveActiveUpstreamId(input, upstreams, upstreamOrder = []) {
 function normalizeUpstreamAggregation(input = {}, upstreams = {}, upstreamOrder = [], fallbackUpstreamId = "") {
   const source = input && typeof input === "object" ? input : {};
   const sourceCounts = source.counts && typeof source.counts === "object" ? source.counts : {};
+  const timeoutSeconds = normalizeAggregateTimeoutSeconds(
+    source.timeoutSeconds,
+    DEFAULT_UPSTREAM_AGGREGATION.timeoutSeconds,
+  );
   const orderedIds = normalizeUpstreamOrder(upstreamOrder, upstreams);
   const counts = {};
 
@@ -251,7 +267,10 @@ function normalizeUpstreamAggregation(input = {}, upstreams = {}, upstreamOrder 
   });
 
   if (Object.values(counts).some((value) => value > 0)) {
-    return { counts };
+    return {
+      counts,
+      timeoutSeconds,
+    };
   }
 
   const fallbackId = resolveActiveUpstreamId(fallbackUpstreamId, upstreams, upstreamOrder);
@@ -267,6 +286,7 @@ function normalizeUpstreamAggregation(input = {}, upstreams = {}, upstreamOrder 
 
   return {
     counts,
+    timeoutSeconds,
   };
 }
 
@@ -686,6 +706,7 @@ async function updatePanelSettings(settings = {}) {
 
 module.exports = {
   ACTIVE_UPSTREAM_MODES,
+  DEFAULT_AGGREGATE_TIMEOUT_SECONDS,
   DEFAULT_PASSWORD,
   DEFAULT_USER_KEY,
   MAX_AGGREGATE_COPIES,
@@ -703,6 +724,7 @@ module.exports = {
   listRelayUsers,
   listUpstreamConfigs,
   loadSecurityState,
+  normalizeAggregateTimeoutSeconds,
   normalizeDisplayOrigin,
   normalizeUserKey,
   resolveRelayUserByToken,

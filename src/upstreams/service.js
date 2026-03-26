@@ -2,8 +2,10 @@
 
 const {
   ACTIVE_UPSTREAM_MODES,
+  DEFAULT_AGGREGATE_TIMEOUT_SECONDS,
   getUpstreamConfig,
   loadSecurityState,
+  normalizeAggregateTimeoutSeconds,
   RUNTIME_MODES,
 } = require("../authStore");
 const {
@@ -15,6 +17,130 @@ const { getUpstreamModule } = require("./core/registry");
 
 const registrationQueues = new Map();
 const AGGREGATE_STORAGE_DELIMITER = "::";
+
+function normalizeAggregateExecutionTimeoutMs(timeoutSeconds) {
+  const parsed = Number.parseInt(timeoutSeconds, 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return 0;
+  }
+
+  return normalizeAggregateTimeoutSeconds(parsed, DEFAULT_AGGREGATE_TIMEOUT_SECONDS) * 1000;
+}
+
+function buildAggregateTargetKey(target = {}) {
+  return target.storageKey || `${target.upstreamId || "upstream"}:${target.instanceNumber || 1}`;
+}
+
+function normalizeAggregateExecutionError(error) {
+  if (error instanceof Error) {
+    return error;
+  }
+
+  return new Error(`${error || "Unknown error."}`);
+}
+
+function createAggregateTimeoutError(timeoutSeconds) {
+  const error = new Error(`聚合请求超过 ${timeoutSeconds} 秒，已跳过该实例。`);
+  error.code = "AGGREGATE_TIMEOUT";
+  return error;
+}
+
+async function collectAggregateExecutionResults(targets, executor, options = {}) {
+  const orderedTargets = Array.isArray(targets) ? targets : [];
+  const timeoutMs = normalizeAggregateExecutionTimeoutMs(options.timeoutSeconds);
+  const timeoutSeconds =
+    timeoutMs > 0
+      ? Math.max(1, Math.ceil(timeoutMs / 1000))
+      : normalizeAggregateTimeoutSeconds(undefined, DEFAULT_AGGREGATE_TIMEOUT_SECONDS);
+  const successMap = new Map();
+  const failureMap = new Map();
+  const pendingEntries = new Map();
+
+  orderedTargets.forEach((target) => {
+    let wrappedPromise = null;
+    wrappedPromise = Promise.resolve()
+      .then(() => executor(target))
+      .then(
+        (value) => ({
+          wrappedPromise,
+          target,
+          status: "fulfilled",
+          value,
+        }),
+        (error) => ({
+          wrappedPromise,
+          target,
+          status: "rejected",
+          error: normalizeAggregateExecutionError(error),
+        }),
+      );
+    pendingEntries.set(wrappedPromise, target);
+  });
+
+  const deadlineAt = timeoutMs > 0 ? Date.now() + timeoutMs : 0;
+
+  while (pendingEntries.size > 0) {
+    const pendingPromises = Array.from(pendingEntries.keys());
+    if (pendingPromises.length === 0) {
+      break;
+    }
+
+    let outcome = null;
+    if (deadlineAt > 0) {
+      const remainingMs = deadlineAt - Date.now();
+      if (remainingMs <= 0) {
+        break;
+      }
+
+      outcome = await Promise.race([
+        ...pendingPromises,
+        new Promise((resolve) => {
+          setTimeout(() => resolve(null), remainingMs);
+        }),
+      ]);
+
+      if (!outcome) {
+        break;
+      }
+    } else {
+      outcome = await Promise.race(pendingPromises);
+    }
+
+    pendingEntries.delete(outcome.wrappedPromise);
+
+    if (outcome.status === "fulfilled") {
+      successMap.set(buildAggregateTargetKey(outcome.target), {
+        ...outcome.target,
+        ...outcome.value,
+      });
+      continue;
+    }
+
+    failureMap.set(buildAggregateTargetKey(outcome.target), {
+      ...outcome.target,
+      error: outcome.error,
+    });
+  }
+
+  if (pendingEntries.size > 0) {
+    pendingEntries.forEach((target) => {
+      failureMap.set(buildAggregateTargetKey(target), {
+        ...target,
+        error: createAggregateTimeoutError(timeoutSeconds),
+      });
+    });
+  }
+
+  return {
+    targets: orderedTargets
+      .map((target) => successMap.get(buildAggregateTargetKey(target)))
+      .filter(Boolean),
+    failures: orderedTargets
+      .map((target) => failureMap.get(buildAggregateTargetKey(target)))
+      .filter(Boolean),
+    timedOut: pendingEntries.size > 0,
+  };
+}
 
 function enqueueRegistration(queueKey, job) {
   const currentQueue = registrationQueues.get(queueKey) || Promise.resolve();
@@ -637,87 +763,44 @@ async function manualRegisterWithRuntime(userKey, options = {}) {
   throw lastError || new Error("No available upstream.");
 }
 
-async function resolveAggregateViewStates(userKey, relayType = "") {
+async function resolveAggregateViewStates(userKey, relayType = "", options = {}) {
   const targets = await getRuntimeAggregateTargets(relayType);
-  const results = [];
-  const failures = [];
-
-  for (const target of targets) {
-    try {
-      const result = await resolveViewState(userKey, target.upstreamId, target);
-      results.push({
-        ...target,
-        ...result,
-      });
-    } catch (error) {
-      failures.push({
-        ...target,
-        error,
-      });
-    }
-  }
-
-  return {
-    targets: results,
-    failures,
-  };
+  return collectAggregateExecutionResults(
+    targets,
+    async (target) => resolveViewState(userKey, target.upstreamId, target),
+    options,
+  );
 }
 
-async function resolveAggregateRelayStates(userKey, relayType = "") {
+async function resolveAggregateRelayStates(userKey, relayType = "", options = {}) {
   const targets = await getRuntimeAggregateTargets(relayType);
-  const results = [];
-  const failures = [];
-
-  for (const target of targets) {
-    try {
-      const result = await resolveRelayState(userKey, target.upstreamId, relayType, target);
-      results.push({
-        ...target,
-        ...result,
-      });
-    } catch (error) {
-      failures.push({
-        ...target,
-        error,
-      });
-    }
-  }
-
-  return {
-    targets: results,
-    failures,
-  };
+  return collectAggregateExecutionResults(
+    targets,
+    async (target) => resolveRelayState(userKey, target.upstreamId, relayType, target),
+    options,
+  );
 }
 
 async function manualRegisterAggregateWithRuntime(userKey, options = {}) {
   const targets = await getRuntimeAggregateTargets(options.relayType || "");
-  const results = [];
-  const failures = [];
-
-  for (const target of targets) {
-    try {
-      const result = await manualRegister(userKey, target.upstreamId, {
+  const { targets: results, failures } = await collectAggregateExecutionResults(
+    targets,
+    async (target) =>
+      manualRegister(userKey, target.upstreamId, {
         ...options,
         ...target,
-      });
-      results.push({
-        ...target,
-        ...result,
-      });
-    } catch (error) {
-      failures.push({
-        ...target,
-        error,
-      });
-      await appendUserHistory(userKey, target.storageKey, {
-        action: "aggregate_skip",
-        title: "聚合模式跳过失败实例",
-        message: error.message,
-        requestSource: "manual",
-        relayType: options.relayType || "",
-        details: buildHistoryDetails(target, target.upstreamId, target.storageKey),
-      });
-    }
+      }),
+  );
+
+  for (const failure of failures) {
+    await appendUserHistory(userKey, failure.storageKey, {
+      action: "aggregate_skip",
+      title: "鑱氬悎妯″紡璺宠繃澶辫触瀹炰緥",
+      message: failure.error?.message || "Unknown error.",
+      requestSource: "manual",
+      relayType: options.relayType || "",
+      details: buildHistoryDetails(failure, failure.upstreamId, failure.storageKey),
+    });
   }
 
   if (results.length === 0) {
