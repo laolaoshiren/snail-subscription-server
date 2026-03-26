@@ -525,13 +525,22 @@ function normalizeAggregateTimeoutSeconds(value, fallback = 15) {
   return Math.min(parsed, 120);
 }
 
-function getAggregateTimeoutSeconds() {
-  const fallback = normalizeAggregateTimeoutSeconds(state.upstreamAggregation?.timeoutSeconds, 15);
-  if (!aggregateTimeoutSecondsInput) {
+function getStoredAggregateTimeoutSeconds() {
+  return normalizeAggregateTimeoutSeconds(state.upstreamAggregation?.timeoutSeconds, 15);
+}
+
+function getAggregateTimeoutSeconds(preferInput = true) {
+  const fallback = getStoredAggregateTimeoutSeconds();
+  if (!preferInput || !aggregateTimeoutSecondsInput) {
     return fallback;
   }
 
-  return normalizeAggregateTimeoutSeconds(aggregateTimeoutSecondsInput.value, fallback);
+  const rawValue = (aggregateTimeoutSecondsInput.value || "").toString().trim();
+  if (!rawValue) {
+    return fallback;
+  }
+
+  return normalizeAggregateTimeoutSeconds(rawValue, fallback);
 }
 
 function getAggregateSelectionLabel(counts = state.upstreamAggregation?.counts || {}) {
@@ -577,7 +586,7 @@ function renderAggregateSummary(counts = collectAggregateCountsFromForm()) {
 
 function getAggregateConfigSummary(counts = state.upstreamAggregation?.counts || {}) {
   const selectionLabel = getAggregateSelectionLabel(counts) || "点击配置聚合上游";
-  return `${selectionLabel} · ${getAggregateTimeoutSeconds()} 秒`;
+  return `${selectionLabel} · ${getStoredAggregateTimeoutSeconds()} 秒`;
 }
 
 function getRuntimeSelectionLabel(upstream = getActiveUpstream()) {
@@ -885,7 +894,7 @@ function renderAggregateEditor() {
   }
 
   if (aggregateTimeoutSecondsInput) {
-    aggregateTimeoutSecondsInput.value = String(getAggregateTimeoutSeconds());
+    aggregateTimeoutSecondsInput.value = String(getStoredAggregateTimeoutSeconds());
   }
 
   aggregateList.innerHTML = "";
@@ -2144,7 +2153,7 @@ if (aggregateForm) {
     const timeoutSeconds = normalizeAggregateTimeoutSeconds(aggregateTimeoutSecondsInput?.value, 15);
 
     try {
-      await requestJson("/api/settings", {
+      const payload = await requestJson("/api/settings", {
         method: "POST",
         body: JSON.stringify({
           upstreamAggregation: {
@@ -2154,7 +2163,19 @@ if (aggregateForm) {
         }),
       });
 
-      await refreshSession();
+      state.upstreamAggregation =
+        payload.upstreamAggregation && typeof payload.upstreamAggregation === "object"
+          ? payload.upstreamAggregation
+          : {
+              counts,
+              timeoutSeconds,
+            };
+      state.upstreamAggregation.timeoutSeconds = getStoredAggregateTimeoutSeconds();
+      renderUpstreamSwitcher();
+      renderUpstreamList();
+      renderAggregateEditor();
+      renderAggregateSummary();
+      syncUpstreamForm();
       setStatus(`聚合配置已保存：${getAggregateConfigSummary(counts)}。`, "success");
     } catch (error) {
       if (error.status === 401) {
