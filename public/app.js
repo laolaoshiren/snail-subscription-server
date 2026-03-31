@@ -27,6 +27,7 @@ const aggregateSummary = document.querySelector("#aggregateSummary");
 const aggregateTimeoutSecondsInput = document.querySelector("#aggregateTimeoutSeconds");
 const aggregatePreRegistrationEnabledInput = document.querySelector("#aggregatePreRegistrationEnabled");
 const aggregatePreRegistrationIntervalMinutesInput = document.querySelector("#aggregatePreRegistrationIntervalMinutes");
+const aggregatePreRegistrationMaxSourcesInput = document.querySelector("#aggregatePreRegistrationMaxSources");
 const aggregatePreRegistrationStatus = document.querySelector("#aggregatePreRegistrationStatus");
 const saveAggregateButton = document.querySelector("#saveAggregateButton");
 
@@ -138,6 +139,7 @@ const state = {
     preRegistration: {
       enabled: false,
       intervalMinutes: 60,
+      maxSources: 10,
     },
   },
   aggregatePreRegistrationStatus: {
@@ -558,6 +560,15 @@ function normalizeAggregatePreRegistrationIntervalMinutes(value, fallback = 60) 
   return Math.min(parsed, 1440);
 }
 
+function normalizeAggregatePreRegistrationMaxSources(value, fallback = 10) {
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return fallback;
+  }
+
+  return Math.min(parsed, 50);
+}
+
 function getStoredAggregateTimeoutSeconds() {
   return normalizeAggregateTimeoutSeconds(state.upstreamAggregation?.timeoutSeconds, 15);
 }
@@ -587,6 +598,13 @@ function getStoredAggregatePreRegistrationIntervalMinutes() {
   );
 }
 
+function getStoredAggregatePreRegistrationMaxSources() {
+  return normalizeAggregatePreRegistrationMaxSources(
+    state.upstreamAggregation?.preRegistration?.maxSources,
+    10,
+  );
+}
+
 function getAggregatePreRegistrationEnabled(preferInput = true) {
   if (!preferInput || !aggregatePreRegistrationEnabledInput) {
     return getStoredAggregatePreRegistrationEnabled();
@@ -607,6 +625,20 @@ function getAggregatePreRegistrationIntervalMinutes(preferInput = true) {
   }
 
   return normalizeAggregatePreRegistrationIntervalMinutes(rawValue, fallback);
+}
+
+function getAggregatePreRegistrationMaxSources(preferInput = true) {
+  const fallback = getStoredAggregatePreRegistrationMaxSources();
+  if (!preferInput || !aggregatePreRegistrationMaxSourcesInput) {
+    return fallback;
+  }
+
+  const rawValue = (aggregatePreRegistrationMaxSourcesInput.value || "").toString().trim();
+  if (!rawValue) {
+    return fallback;
+  }
+
+  return normalizeAggregatePreRegistrationMaxSources(rawValue, fallback);
 }
 
 function getAggregateSelectionLabel(counts = state.upstreamAggregation?.counts || {}) {
@@ -646,22 +678,22 @@ function renderAggregateSummary(counts = collectAggregateCountsFromForm()) {
     return;
   }
 
-  const selectionLabel = getAggregateSelectionLabel(counts) || "未选择上游";
+  const selectionLabel = getAggregateSelectionLabel(counts) || "No upstream selected";
   const preRegistrationLabel = getAggregatePreRegistrationEnabled()
-    ? `缓存预注册 ${getAggregatePreRegistrationIntervalMinutes()} 分钟`
-    : "实时聚合";
+    ? `Cached pre-registration ${getAggregatePreRegistrationIntervalMinutes()} min / ${getAggregatePreRegistrationMaxSources()} sources`
+    : "Real-time aggregate";
   setText(
     aggregateSummary,
-    `${selectionLabel} · ${getAggregateTimeoutSeconds()} 秒超时 · ${preRegistrationLabel}`,
+    `${selectionLabel} | ${getAggregateTimeoutSeconds()}s timeout | ${preRegistrationLabel}`,
   );
 }
 
 function getAggregateConfigSummary(counts = state.upstreamAggregation?.counts || {}) {
-  const selectionLabel = getAggregateSelectionLabel(counts) || "点击配置聚合上游";
+  const selectionLabel = getAggregateSelectionLabel(counts) || "Click to configure aggregate upstreams";
   const preRegistrationLabel = getStoredAggregatePreRegistrationEnabled()
-    ? `缓存 ${getStoredAggregatePreRegistrationIntervalMinutes()} 分钟`
-    : "实时";
-  return `${selectionLabel} · ${getStoredAggregateTimeoutSeconds()} 秒 · ${preRegistrationLabel}`;
+    ? `Cache ${getStoredAggregatePreRegistrationIntervalMinutes()} min / ${getStoredAggregatePreRegistrationMaxSources()} sources`
+    : "Real-time";
+  return `${selectionLabel} | ${getStoredAggregateTimeoutSeconds()}s | ${preRegistrationLabel}`;
 }
 
 function getRuntimeSelectionLabel(upstream = getActiveUpstream()) {
@@ -765,37 +797,37 @@ function renderAggregatePreRegistrationStatus() {
   state.aggregatePreRegistrationStatus = status;
 
   if (!getStoredAggregatePreRegistrationEnabled()) {
-    aggregatePreRegistrationStatus.textContent = "关闭后将保持实时聚合，下游请求会现场注册并拉取上游订阅。";
+    aggregatePreRegistrationStatus.textContent = "Disabled: downstream requests will still register and fetch upstream subscriptions in real time.";
     return;
   }
 
   if (!status.enabled) {
-    aggregatePreRegistrationStatus.textContent = "已开启缓存预注册，但当前运行模式不是聚合模式或没有可用上游，调度不会执行。";
+    aggregatePreRegistrationStatus.textContent = "Enabled in settings, but aggregate mode or usable upstreams are not available, so the scheduler will not run.";
     return;
   }
 
   if (status.running) {
-    aggregatePreRegistrationStatus.textContent = `后台预注册正在执行，上次完成：${formatDateTime(
+    aggregatePreRegistrationStatus.textContent = `Background pre-registration is running. Last completed: ${formatDateTime(
       status.lastCompletedAt,
-    )}。`;
+    )}.`;
     return;
   }
 
   if (status.lastSuccessfulAt) {
     aggregatePreRegistrationStatus.textContent =
-      `最近成功：${formatDateTime(status.lastSuccessfulAt)}，下次执行：${formatDateTime(
+      `Last success: ${formatDateTime(status.lastSuccessfulAt)}. Next run: ${formatDateTime(
         status.nextRunAt,
-      )}，最近生成 ${status.lastRun.cacheCount || 0} 份缓存，合并 ${status.lastRun.sourceCount || 0} 路上游。`;
+      )}. Last run built ${status.lastRun.cacheCount || 0} cached subscriptions and retained ${status.lastRun.sourceCount || 0} usable sources.`;
     return;
   }
 
   if (status.lastError) {
-    aggregatePreRegistrationStatus.textContent = `暂未生成可用缓存：${status.lastError}`;
+    aggregatePreRegistrationStatus.textContent = `No usable cache has been generated yet: ${status.lastError}`;
     return;
   }
 
   aggregatePreRegistrationStatus.textContent =
-    `已开启缓存预注册，首次任务将在 ${formatDateTime(status.nextRunAt)} 执行。`;
+    `Cached pre-registration is enabled. First run will execute at ${formatDateTime(status.nextRunAt)}.`;
 }
 
 function formatCommit(value) {
@@ -1044,6 +1076,12 @@ function renderAggregateEditor() {
     );
     aggregatePreRegistrationIntervalMinutesInput.disabled = !getStoredAggregatePreRegistrationEnabled();
   }
+  if (aggregatePreRegistrationMaxSourcesInput) {
+    aggregatePreRegistrationMaxSourcesInput.value = String(
+      getStoredAggregatePreRegistrationMaxSources(),
+    );
+    aggregatePreRegistrationMaxSourcesInput.disabled = !getStoredAggregatePreRegistrationEnabled();
+  }
 
   aggregateList.innerHTML = "";
 
@@ -1063,7 +1101,7 @@ function renderAggregateEditor() {
           />
           <span class="aggregate-item__copy">
             <strong>${upstream.label || upstream.id}</strong>
-            <small>${enabled ? upstream.id : "已停用"}</small>
+            <small>${enabled ? upstream.id : "Disabled"}</small>
           </span>
         </span>
       </span>
@@ -1867,6 +1905,7 @@ function applySession(payload) {
           preRegistration: {
             enabled: false,
             intervalMinutes: 60,
+            maxSources: 10,
           },
         };
   state.upstreamAggregation.timeoutSeconds = normalizeAggregateTimeoutSeconds(
@@ -1879,6 +1918,7 @@ function applySession(payload) {
       : {
           enabled: false,
           intervalMinutes: 60,
+          maxSources: 10,
         };
   state.upstreamAggregation.preRegistration.enabled = Boolean(
     state.upstreamAggregation.preRegistration.enabled,
@@ -1886,6 +1926,10 @@ function applySession(payload) {
   state.upstreamAggregation.preRegistration.intervalMinutes = normalizeAggregatePreRegistrationIntervalMinutes(
     state.upstreamAggregation.preRegistration.intervalMinutes,
     60,
+  );
+  state.upstreamAggregation.preRegistration.maxSources = normalizeAggregatePreRegistrationMaxSources(
+    state.upstreamAggregation.preRegistration.maxSources,
+    10,
   );
   state.aggregatePreRegistrationStatus = normalizeAggregatePreRegistrationStatus(
     payload.aggregatePreRegistrationStatus,
@@ -2320,6 +2364,9 @@ if (aggregateForm) {
     if (aggregatePreRegistrationIntervalMinutesInput) {
       aggregatePreRegistrationIntervalMinutesInput.disabled = !aggregatePreRegistrationEnabledInput.checked;
     }
+    if (aggregatePreRegistrationMaxSourcesInput) {
+      aggregatePreRegistrationMaxSourcesInput.disabled = !aggregatePreRegistrationEnabledInput.checked;
+    }
     renderAggregateSummary();
     renderAggregatePreRegistrationStatus();
   });
@@ -2328,6 +2375,15 @@ if (aggregateForm) {
       normalizeAggregatePreRegistrationIntervalMinutes(
         aggregatePreRegistrationIntervalMinutesInput.value,
         60,
+      ),
+    );
+    renderAggregateSummary();
+  });
+  aggregatePreRegistrationMaxSourcesInput?.addEventListener("input", () => {
+    aggregatePreRegistrationMaxSourcesInput.value = String(
+      normalizeAggregatePreRegistrationMaxSources(
+        aggregatePreRegistrationMaxSourcesInput.value,
+        10,
       ),
     );
     renderAggregateSummary();
@@ -2345,6 +2401,10 @@ if (aggregateForm) {
       aggregatePreRegistrationIntervalMinutesInput?.value,
       60,
     );
+    const preRegistrationMaxSources = normalizeAggregatePreRegistrationMaxSources(
+      aggregatePreRegistrationMaxSourcesInput?.value,
+      10,
+    );
 
     try {
       const payload = await requestJson("/api/settings", {
@@ -2356,6 +2416,7 @@ if (aggregateForm) {
             preRegistration: {
               enabled: preRegistrationEnabled,
               intervalMinutes: preRegistrationIntervalMinutes,
+              maxSources: preRegistrationMaxSources,
             },
           },
         }),
@@ -2370,6 +2431,7 @@ if (aggregateForm) {
               preRegistration: {
                 enabled: preRegistrationEnabled,
                 intervalMinutes: preRegistrationIntervalMinutes,
+                maxSources: preRegistrationMaxSources,
               },
             };
       state.upstreamAggregation.timeoutSeconds = getStoredAggregateTimeoutSeconds();
@@ -2379,11 +2441,13 @@ if (aggregateForm) {
           : {
               enabled: preRegistrationEnabled,
               intervalMinutes: preRegistrationIntervalMinutes,
+              maxSources: preRegistrationMaxSources,
             };
       state.upstreamAggregation.preRegistration.enabled = Boolean(
         state.upstreamAggregation.preRegistration.enabled,
       );
       state.upstreamAggregation.preRegistration.intervalMinutes = getStoredAggregatePreRegistrationIntervalMinutes();
+      state.upstreamAggregation.preRegistration.maxSources = getStoredAggregatePreRegistrationMaxSources();
       state.aggregatePreRegistrationStatus = normalizeAggregatePreRegistrationStatus(
         payload.aggregatePreRegistrationStatus,
       );
@@ -2394,8 +2458,8 @@ if (aggregateForm) {
       syncUpstreamForm();
       setStatus(
         preRegistrationEnabled
-          ? `聚合配置已保存：${getAggregateConfigSummary(counts)}，后台已开始预热缓存。`
-          : `聚合配置已保存：${getAggregateConfigSummary(counts)}。`,
+          ? `Aggregate settings saved: ${getAggregateConfigSummary(counts)}. Background cache warm-up started.`
+          : `Aggregate settings saved: ${getAggregateConfigSummary(counts)}.`,
         "success",
       );
     } catch (error) {

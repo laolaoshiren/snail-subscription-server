@@ -11,13 +11,15 @@ const yaml = require("js-yaml");
 const {
   getAggregateCacheEntry,
   getAggregateCacheScheduler,
-  mergeAggregateCacheEntries,
+  getAggregateCacheUserState,
+  replaceAggregateCacheUserState,
   updateAggregateCacheScheduler,
 } = require("./aggregateCacheStore");
 const { ensureProxyConfigured } = require("./httpClient");
 const {
   ACTIVE_UPSTREAM_MODES,
   DEFAULT_AGGREGATE_PREREGISTRATION_INTERVAL_MINUTES,
+  DEFAULT_AGGREGATE_PREREGISTRATION_MAX_SOURCES,
   DEFAULT_AGGREGATE_TIMEOUT_SECONDS,
   DEFAULT_PASSWORD,
   DEFAULT_USER_KEY,
@@ -66,6 +68,8 @@ const {
   getRuntimeCandidateUpstreamIds,
   manualRegisterAggregateWithRuntime,
   manualRegisterWithRuntime,
+  mergeRegistrationWithUsage,
+  queryCurrentUsage,
   resolveAggregateRelayStates,
   resolveAggregateViewStates,
   resolveRelayState,
@@ -1741,6 +1745,16 @@ function getAggregatePreRegistrationSettings(upstreamAggregation = {}) {
         DEFAULT_AGGREGATE_PREREGISTRATION_INTERVAL_MINUTES,
       ),
     ),
+    maxSources: Math.max(
+      1,
+      Math.min(
+        50,
+        Number.parseInt(
+          source.maxSources || `${DEFAULT_AGGREGATE_PREREGISTRATION_MAX_SOURCES}`,
+          10,
+        ) || DEFAULT_AGGREGATE_PREREGISTRATION_MAX_SOURCES,
+      ),
+    ),
   };
 }
 
@@ -2560,114 +2574,477 @@ function buildAggregateCacheFailureMessage(userSummaries = []) {
 
 async function buildAggregateCacheEntriesForUser(
   userKey,
-  runtime,
+  configuredTargets = [],
   configuredTargetsByType = {},
   options = {},
 ) {
-  let registrationResult = null;
-
-  try {
-    registrationResult = await manualRegisterAggregateWithRuntime(userKey, {
-      timeoutSeconds: options.timeoutSeconds,
-    });
-  } catch (error) {
-    return {
-      userKey,
-      cacheEntries: {},
-      cacheCount: 0,
-      sourceCount: 0,
-      failureCount: 1,
-      error: error.message,
-    };
-  }
-
-  const registeredTargetMap = new Map(
-    registrationResult.targets.map((target) => [target.storageKey || target.upstreamId, target]),
+  const configuredTargetMap = new Map(
+    (Array.isArray(configuredTargets) ? configuredTargets : []).map((target) => [
+      target.storageKey || target.upstreamId,
+      target,
+    ]),
   );
-  const cacheEntries = {};
-  const generatedAt = new Date().toISOString();
-  let cacheCount = 0;
-  let sourceCount = 0;
-  let failureCount = registrationResult.failures.length;
+  const currentUserState = await getAggregateCacheUserState(userKey);
+  const existingSourcePool = (Array.isArray(currentUserState?.sourcePool) ? currentUserState.sourcePool : [])
+    .filter((entry) => configuredTargetMap.has(entry.storageKey || entry.upstreamId));
 
-  for (const type of RELAY_TYPES) {
-    const configuredTargets = Array.isArray(configuredTargetsByType[type])
-      ? configuredTargetsByType[type]
-      : [];
-    const signature = buildAggregateTargetSignature(configuredTargets);
-    if (!signature) {
-      continue;
-    }
-
-    const fetchTargets = configuredTargets
-      .map((target) => registeredTargetMap.get(target.storageKey || target.upstreamId))
-      .filter((target) => Boolean(target?.userState?.latestRegistration?.clientUrls?.[type]));
-    if (fetchTargets.length === 0) {
-      continue;
-    }
-
-    const fetchResult = await collectAggregateExecutionResults(
-      fetchTargets,
-      async (target) => ({
-        ...target,
-        payload: await fetchResolvedSubscriptionSource(target, type, "GET", {
-          timeoutSeconds: options.timeoutSeconds,
-          timeoutMs: options.timeoutMs,
-        }),
-      }),
-      {
-        timeoutSeconds: options.timeoutSeconds,
-        timeoutMs: options.timeoutMs,
-      },
-    );
-
-    const successfulFetches = fetchResult.targets.map((entry) => ({
-      target: entry,
-      payload: entry.payload,
+  const existingValidationPromise = validateAggregateSourcePoolEntries(
+    existingSourcePool,
+    configuredTargetMap,
+    options,
+  );
+  const registrationPromise = manualRegisterAggregateWithRuntime(userKey, {
+    timeoutSeconds: options.timeoutSeconds,
+  })
+    .then((result) => ({
+      result,
+      error: null,
+    }))
+    .catch((error) => ({
+      result: null,
+      error: normalizeAggregateExecutionError(error),
     }));
-    const combinedFailures = [...registrationResult.failures, ...fetchResult.failures];
-    failureCount += fetchResult.failures.length;
 
-    if (successfulFetches.length === 0) {
-      continue;
-    }
+  const [existingValidation, registrationOutcome] = await Promise.all([
+    existingValidationPromise,
+    registrationPromise,
+  ]);
 
-    const mergedHeaders = buildAggregateMergedHeaders(
-      type,
-      successfulFetches,
-      `RelayHub Cached Aggregate ${type}`,
-    );
-    const mergedBody = await buildAggregateMergedBody(type, successfulFetches, {
-      stripRules: true,
-    });
+  const registrationFailures = registrationOutcome?.result?.failures
+    ? [...registrationOutcome.result.failures]
+    : registrationOutcome?.error
+      ? [
+          {
+            upstreamId: "aggregate",
+            storageKey: "aggregate",
+            instanceLabel: "aggregate",
+            error: registrationOutcome.error,
+          },
+        ]
+      : [];
 
-    cacheEntries[type] = {
-      type,
-      signature,
-      headers: mergedHeaders,
-      bodyBase64: mergedBody.toString("base64"),
-      generatedAt,
-      sourceCount: successfulFetches.length,
-      failureCount: combinedFailures.length,
-      warning: buildAggregateWarning(combinedFailures),
-      sourceLabels: successfulFetches.map(
-        (entry) => entry.target.instanceLabel || entry.target.upstreamId,
-      ),
-    };
-    cacheCount += 1;
-    sourceCount += successfulFetches.length;
-  }
+  const newSourceEntries = registrationOutcome?.result?.targets
+    ? registrationOutcome.result.targets
+      .map((target) => createAggregateSourcePoolEntry(target))
+      .filter(Boolean)
+    : [];
+  const newValidation = await validateAggregateSourcePoolEntries(
+    newSourceEntries,
+    configuredTargetMap,
+    options,
+  );
+  const retainedEntries = trimAggregateValidatedEntries(
+    [...existingValidation.validatedEntries, ...newValidation.validatedEntries],
+    options.maxSources,
+  );
+  const retainedSourcePool = retainedEntries.map((entry) => entry.sourcePoolEntry);
+  const retainedTargets = retainedEntries.map((entry) => entry.target);
+  const cacheBuild = await buildAggregateCacheEntriesFromSourceTargets(
+    retainedTargets,
+    configuredTargetsByType,
+    options,
+  );
+  const combinedFailures = [
+    ...registrationFailures,
+    ...existingValidation.failures,
+    ...newValidation.failures,
+    ...cacheBuild.failures,
+  ];
+  const failureCount = combinedFailures.length;
+  const error =
+    cacheBuild.cacheCount > 0
+      ? ""
+      : buildAggregateWarning(combinedFailures)
+        || registrationOutcome?.error?.message
+        || "No aggregate source produced a cache.";
 
   return {
     userKey,
-    cacheEntries,
-    cacheCount,
-    sourceCount,
+    cacheEntries: cacheBuild.cacheEntries,
+    sourcePool: retainedSourcePool,
+    cacheCount: cacheBuild.cacheCount,
+    sourceCount: retainedSourcePool.length,
     failureCount,
-    error:
-      cacheCount > 0
-        ? ""
-        : buildAggregateWarning(registrationResult.failures) || "No aggregate source produced a cache.",
+    error,
+  };
+}
+
+function getAggregateSourcePoolEntryTimestamp(entry = {}) {
+  return toTimestamp(entry.savedAt || entry.registration?.createdAt || "");
+}
+
+function getAggregateValidatedEntryTimestamp(entry = {}) {
+  return getAggregateSourcePoolEntryTimestamp(entry.sourcePoolEntry || {});
+}
+
+function sortAggregateSourcePoolEntries(entries = []) {
+  return [...(Array.isArray(entries) ? entries : [])]
+    .filter(Boolean)
+    .sort((left, right) =>
+      getAggregateSourcePoolEntryTimestamp(right) - getAggregateSourcePoolEntryTimestamp(left));
+}
+
+function buildAggregateSourcePoolEntryId(target = {}, savedAt = "") {
+  const registration = target?.userState?.latestRegistration || target?.registration || null;
+  const storageKey = (target.storageKey || target.upstreamId || "").toString().trim();
+  return [
+    storageKey,
+    (savedAt || registration?.createdAt || "").toString().trim(),
+    (registration?.email || "").toString().trim(),
+  ]
+    .filter(Boolean)
+    .join(":");
+}
+
+function createAggregateSourcePoolEntry(target = {}, savedAt = "") {
+  const registration = target?.userState?.latestRegistration || target?.registration || null;
+  if (!registration) {
+    return null;
+  }
+
+  const upstreamId = (target.upstreamId || target.storageKey || "").toString().trim();
+  const storageKey = (target.storageKey || upstreamId).toString().trim() || upstreamId;
+  const normalizedSavedAt =
+    (savedAt || target.savedAt || registration.createdAt || new Date().toISOString())
+      .toString()
+      .trim();
+  const id =
+    (target.id || buildAggregateSourcePoolEntryId(target, normalizedSavedAt)).toString().trim()
+    || buildAggregateSourcePoolEntryId(
+      {
+        upstreamId,
+        storageKey,
+        registration,
+      },
+      normalizedSavedAt,
+    );
+
+  return {
+    id,
+    upstreamId,
+    storageKey,
+    instanceNumber: Math.max(1, Number.parseInt(target.instanceNumber, 10) || 1),
+    instanceLabel: (target.instanceLabel || storageKey || upstreamId).toString().trim()
+      || storageKey
+      || upstreamId,
+    savedAt: normalizedSavedAt,
+    lastValidatedAt: (target.lastValidatedAt || "").toString().trim(),
+    lastValidationError: (target.lastValidationError || "").toString(),
+    registration,
+    latestUsage: target?.userState?.latestUsage || target?.latestUsage || null,
+  };
+}
+
+function trimAggregateValidatedEntries(entries = [], limit = DEFAULT_AGGREGATE_PREREGISTRATION_MAX_SOURCES) {
+  const normalizedLimit = Math.max(
+    1,
+    Math.min(
+      50,
+      Number.parseInt(limit, 10) || DEFAULT_AGGREGATE_PREREGISTRATION_MAX_SOURCES,
+    ),
+  );
+  const uniqueEntries = new Map();
+
+  [...(Array.isArray(entries) ? entries : [])]
+    .filter((entry) => entry?.sourcePoolEntry && entry?.target)
+    .sort((left, right) => getAggregateValidatedEntryTimestamp(right) - getAggregateValidatedEntryTimestamp(left))
+    .forEach((entry) => {
+      const sourcePoolEntry = entry.sourcePoolEntry;
+      const id =
+        sourcePoolEntry?.id
+        || buildAggregateSourcePoolEntryId(sourcePoolEntry, sourcePoolEntry?.savedAt || "");
+      if (id && !uniqueEntries.has(id)) {
+        uniqueEntries.set(id, entry);
+      }
+    });
+
+  return Array.from(uniqueEntries.values()).slice(0, normalizedLimit);
+}
+
+function pickAggregatePoolValidationType(clientUrls = {}) {
+  const preferredTypes = ["clash", "universal", "sing-box", ...RELAY_TYPES]
+    .filter((type, index, list) => list.indexOf(type) === index);
+  return preferredTypes.find((type) => Boolean(clientUrls?.[type])) || "";
+}
+
+function isAggregateRegistrationExpired(registration = null) {
+  const expiredAt = (registration?.expiredAt || "").toString().trim();
+  return Boolean(expiredAt) && toTimestamp(expiredAt) > 0 && toTimestamp(expiredAt) <= Date.now();
+}
+
+function isAggregateUsageExpiredOrExhausted(usage = null) {
+  if (!usage || typeof usage !== "object") {
+    return false;
+  }
+
+  const expiredAt = (usage.expiredAt || "").toString().trim();
+  if (expiredAt && toTimestamp(expiredAt) > 0 && toTimestamp(expiredAt) <= Date.now()) {
+    return true;
+  }
+
+  const transferEnable = typeof usage.transferEnable === "number" ? usage.transferEnable : null;
+  const remainingTraffic = typeof usage.remainingTraffic === "number" ? usage.remainingTraffic : null;
+  const remainingPercent = typeof usage.remainingPercent === "number" ? usage.remainingPercent : null;
+  const usedTotal = typeof usage.usedTotal === "number" ? usage.usedTotal : null;
+  const hasTrafficQuota = transferEnable !== null && transferEnable > 0;
+
+  if (hasTrafficQuota && remainingTraffic !== null && remainingTraffic <= 0) {
+    return true;
+  }
+  if (hasTrafficQuota && remainingPercent !== null && remainingPercent <= 0) {
+    return true;
+  }
+  if (hasTrafficQuota && usedTotal !== null && usedTotal >= transferEnable) {
+    return true;
+  }
+
+  return false;
+}
+
+function buildAggregateTargetFromPoolEntry(
+  entry = {},
+  configuredTarget = {},
+  upstreamConfig = null,
+  latestUsage = null,
+) {
+  const mergedRegistration = mergeRegistrationWithUsage(
+    entry.registration,
+    latestUsage || entry.latestUsage || null,
+  );
+  if (!mergedRegistration) {
+    return null;
+  }
+
+  return {
+    upstreamId: configuredTarget.upstreamId || entry.upstreamId,
+    storageKey: configuredTarget.storageKey || entry.storageKey || entry.upstreamId,
+    instanceNumber: configuredTarget.instanceNumber || entry.instanceNumber || 1,
+    instanceLabel:
+      configuredTarget.instanceLabel || entry.instanceLabel || entry.storageKey || entry.upstreamId,
+    upstreamConfig,
+    userState: {
+      latestRegistration: mergedRegistration,
+      latestUsage: latestUsage || entry.latestUsage || null,
+    },
+  };
+}
+
+async function validateAggregateSourcePoolEntries(entries = [], configuredTargetMap = new Map(), options = {}) {
+  const sourceEntries = Array.isArray(entries) ? entries : [];
+  if (sourceEntries.length === 0) {
+    return {
+      validatedEntries: [],
+      failures: [],
+      timedOut: false,
+    };
+  }
+
+  const timeoutSeconds = options.timeoutSeconds;
+  const timeoutMs = options.timeoutMs;
+  const deadlineAt = Date.now() + (
+    Number.isFinite(timeoutMs) && timeoutMs > 0
+      ? timeoutMs
+      : getAggregateTimeoutSeconds({
+        timeoutSeconds,
+      }) * 1000
+  );
+  const validationResult = await collectAggregateExecutionResults(
+    sourceEntries,
+    async (entry) => {
+      const configuredTarget = configuredTargetMap.get(entry.storageKey || entry.upstreamId);
+      if (!configuredTarget) {
+        throw new Error("Aggregate source is no longer configured.");
+      }
+
+      const upstreamConfig = await getUpstreamConfig(configuredTarget.upstreamId);
+      if (!upstreamConfig || upstreamConfig.enabled === false) {
+        throw new Error("Current upstream is disabled.");
+      }
+
+      let queriedUsage = null;
+      try {
+        queriedUsage = await queryCurrentUsage(configuredTarget.upstreamId, entry.registration);
+      } catch {
+        queriedUsage = null;
+      }
+
+      const resolvedTarget = buildAggregateTargetFromPoolEntry(
+        entry,
+        configuredTarget,
+        upstreamConfig,
+        queriedUsage,
+      );
+      const latestRegistration = resolvedTarget?.userState?.latestRegistration;
+      if (!latestRegistration) {
+        throw new Error("No latest registration is available.");
+      }
+
+      if (isAggregateRegistrationExpired(latestRegistration)) {
+        throw new Error("Upstream subscription expired.");
+      }
+      if (queriedUsage && isAggregateUsageExpiredOrExhausted(queriedUsage)) {
+        throw new Error("Upstream subscription exhausted.");
+      }
+
+      const probeType = pickAggregatePoolValidationType(latestRegistration.clientUrls);
+      if (!probeType) {
+        throw new Error("No subscription URL is available for testing.");
+      }
+
+      await fetchResolvedSubscriptionSource(resolvedTarget, probeType, "GET", {
+        timeoutSeconds,
+        timeoutMs,
+        deadlineAt,
+      });
+
+      return {
+        validatedEntry: {
+          sourcePoolEntry: {
+            ...createAggregateSourcePoolEntry(
+              {
+                ...resolvedTarget,
+                id: entry.id,
+              },
+              entry.savedAt || latestRegistration.createdAt || new Date().toISOString(),
+            ),
+            lastValidatedAt: new Date().toISOString(),
+            lastValidationError: "",
+            latestUsage: queriedUsage || resolvedTarget.userState.latestUsage || null,
+          },
+          target: resolvedTarget,
+        },
+      };
+    },
+    {
+      timeoutSeconds,
+      timeoutMs,
+      deadlineAt,
+    },
+  );
+
+  return {
+    validatedEntries: validationResult.targets
+      .map((entry) => entry.validatedEntry)
+      .filter(Boolean),
+    failures: validationResult.failures,
+    timedOut: validationResult.timedOut,
+  };
+}
+
+async function buildAggregateCacheEntriesFromSourceTargets(
+  sourceTargets = [],
+  configuredTargetsByType = {},
+  options = {},
+) {
+  const generatedAt = new Date().toISOString();
+  const timeoutSeconds = options.timeoutSeconds;
+  const timeoutMs = options.timeoutMs;
+  const deadlineAt = Date.now() + (
+    Number.isFinite(timeoutMs) && timeoutMs > 0
+      ? timeoutMs
+      : getAggregateTimeoutSeconds({
+        timeoutSeconds,
+      }) * 1000
+  );
+  const typeSummaries = await Promise.all(
+    RELAY_TYPES.map(async (type) => {
+      const configuredTargets = Array.isArray(configuredTargetsByType[type])
+        ? configuredTargetsByType[type]
+        : [];
+      const signature = buildAggregateTargetSignature(configuredTargets);
+      if (!signature) {
+        return null;
+      }
+
+      const configuredStorageKeys = new Set(
+        configuredTargets.map((target) => target.storageKey || target.upstreamId),
+      );
+      const fetchTargets = (Array.isArray(sourceTargets) ? sourceTargets : [])
+        .filter((target) =>
+          configuredStorageKeys.has(target.storageKey || target.upstreamId)
+          && Boolean(target?.userState?.latestRegistration?.clientUrls?.[type]));
+      if (fetchTargets.length === 0) {
+        return {
+          type,
+          signature,
+          cacheEntry: null,
+          failures: [],
+        };
+      }
+
+      const fetchResult = await collectAggregateExecutionResults(
+        fetchTargets,
+        async (target) => ({
+          payload: await fetchResolvedSubscriptionSource(target, type, "GET", {
+            timeoutSeconds,
+            timeoutMs,
+            deadlineAt,
+          }),
+        }),
+        {
+          timeoutSeconds,
+          timeoutMs,
+          deadlineAt,
+        },
+      );
+      const successfulFetches = fetchResult.targets.map((entry) => ({
+        target: entry,
+        payload: entry.payload,
+      }));
+      if (successfulFetches.length === 0) {
+        return {
+          type,
+          signature,
+          cacheEntry: null,
+          failures: fetchResult.failures,
+        };
+      }
+
+      const mergedHeaders = buildAggregateMergedHeaders(
+        type,
+        successfulFetches,
+        `RelayHub Cached Aggregate ${type}`,
+      );
+      const mergedBody = await buildAggregateMergedBody(type, successfulFetches, {
+        stripRules: true,
+      });
+
+      return {
+        type,
+        signature,
+        cacheEntry: {
+          type,
+          signature,
+          headers: mergedHeaders,
+          bodyBase64: mergedBody.toString("base64"),
+          generatedAt,
+          sourceCount: successfulFetches.length,
+          failureCount: fetchResult.failures.length,
+          warning: buildAggregateWarning(fetchResult.failures),
+          sourceLabels: successfulFetches.map(
+            (entry) => entry.target.instanceLabel || entry.target.upstreamId,
+          ),
+        },
+        failures: fetchResult.failures,
+      };
+    }),
+  );
+  const cacheEntries = {};
+  const failures = [];
+
+  typeSummaries.filter(Boolean).forEach((summary) => {
+    if (summary.cacheEntry) {
+      cacheEntries[summary.type] = summary.cacheEntry;
+    }
+    failures.push(...summary.failures);
+  });
+
+  return {
+    cacheEntries,
+    cacheCount: Object.keys(cacheEntries).length,
+    sourceCount: Array.isArray(sourceTargets) ? sourceTargets.length : 0,
+    failureCount: failures.length,
+    failures,
   };
 }
 
@@ -2776,26 +3153,28 @@ async function runAggregatePreRegistrationCycle(trigger = "scheduled") {
     });
 
     const relayUsers = await listRelayUsers();
-    const userSummaries = [];
     const aggregateTimeoutSeconds = getAggregateTimeoutSeconds(runtime.upstreamAggregation);
     const aggregateTimeoutMs = getAggregateTimeoutMs(runtime.upstreamAggregation);
-
-    for (const relayUser of relayUsers) {
-      const summary = await buildAggregateCacheEntriesForUser(
-        relayUser.key,
-        runtime,
-        configuredTargetsByType,
-        {
-          timeoutSeconds: aggregateTimeoutSeconds,
-          timeoutMs: aggregateTimeoutMs,
-        },
-      );
-      userSummaries.push(summary);
-
-      if (summary.cacheCount > 0) {
-        await mergeAggregateCacheEntries(relayUser.key, summary.cacheEntries);
-      }
-    }
+    const userSummaries = await Promise.all(
+      relayUsers.map((relayUser) =>
+        buildAggregateCacheEntriesForUser(
+          relayUser.key,
+          configuredTargets,
+          configuredTargetsByType,
+          {
+            timeoutSeconds: aggregateTimeoutSeconds,
+            timeoutMs: aggregateTimeoutMs,
+            maxSources: preRegistration.maxSources,
+          },
+        )),
+    );
+    await Promise.all(
+      userSummaries.map((summary) =>
+        replaceAggregateCacheUserState(summary.userKey, {
+          cacheEntries: summary.cacheEntries,
+          sourcePool: summary.sourcePool,
+        })),
+    );
 
     const completedAt = new Date().toISOString();
     const cacheCount = userSummaries.reduce((total, item) => total + (item.cacheCount || 0), 0);

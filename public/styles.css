@@ -408,7 +408,7 @@ small {
 
 .aggregate-settings-grid {
   display: grid;
-  grid-template-columns: minmax(0, 220px) minmax(0, 220px);
+  grid-template-columns: repeat(auto-fit, minmax(180px, 220px));
   gap: 12px;
   align-items: end;
 }

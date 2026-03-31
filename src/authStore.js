@@ -44,6 +44,8 @@ const DEFAULT_AGGREGATE_TIMEOUT_SECONDS = 15;
 const MAX_AGGREGATE_TIMEOUT_SECONDS = 120;
 const DEFAULT_AGGREGATE_PREREGISTRATION_INTERVAL_MINUTES = 60;
 const MAX_AGGREGATE_PREREGISTRATION_INTERVAL_MINUTES = 1440;
+const DEFAULT_AGGREGATE_PREREGISTRATION_MAX_SOURCES = 10;
+const MAX_AGGREGATE_PREREGISTRATION_MAX_SOURCES = 50;
 let securityStateMutationQueue = Promise.resolve();
 const DEFAULT_UPSTREAM_CLOUD = Object.freeze({
   enabled: true,
@@ -59,6 +61,7 @@ const DEFAULT_UPSTREAM_AGGREGATION = Object.freeze({
   preRegistration: Object.freeze({
     enabled: false,
     intervalMinutes: DEFAULT_AGGREGATE_PREREGISTRATION_INTERVAL_MINUTES,
+    maxSources: DEFAULT_AGGREGATE_PREREGISTRATION_MAX_SOURCES,
   }),
 });
 
@@ -185,6 +188,18 @@ function normalizeAggregatePreRegistrationIntervalMinutes(
   return Math.min(MAX_AGGREGATE_PREREGISTRATION_INTERVAL_MINUTES, parsed);
 }
 
+function normalizeAggregatePreRegistrationMaxSources(
+  value,
+  fallback = DEFAULT_AGGREGATE_PREREGISTRATION_MAX_SOURCES,
+) {
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return fallback;
+  }
+
+  return Math.min(MAX_AGGREGATE_PREREGISTRATION_MAX_SOURCES, parsed);
+}
+
 function normalizeAggregatePreRegistration(input = {}) {
   const source = input && typeof input === "object" ? input : {};
 
@@ -193,6 +208,10 @@ function normalizeAggregatePreRegistration(input = {}) {
     intervalMinutes: normalizeAggregatePreRegistrationIntervalMinutes(
       source.intervalMinutes,
       DEFAULT_UPSTREAM_AGGREGATION.preRegistration.intervalMinutes,
+    ),
+    maxSources: normalizeAggregatePreRegistrationMaxSources(
+      source.maxSources,
+      DEFAULT_UPSTREAM_AGGREGATION.preRegistration.maxSources,
     ),
   };
 }
@@ -740,10 +759,12 @@ async function updatePanelSettings(settings = {}) {
 module.exports = {
   ACTIVE_UPSTREAM_MODES,
   DEFAULT_AGGREGATE_PREREGISTRATION_INTERVAL_MINUTES,
+  DEFAULT_AGGREGATE_PREREGISTRATION_MAX_SOURCES,
   DEFAULT_AGGREGATE_TIMEOUT_SECONDS,
   DEFAULT_PASSWORD,
   DEFAULT_USER_KEY,
   MAX_AGGREGATE_PREREGISTRATION_INTERVAL_MINUTES,
+  MAX_AGGREGATE_PREREGISTRATION_MAX_SOURCES,
   MAX_AGGREGATE_COPIES,
   RELAY_USERS,
   RUNTIME_MODES,
@@ -760,6 +781,7 @@ module.exports = {
   listUpstreamConfigs,
   loadSecurityState,
   normalizeAggregatePreRegistrationIntervalMinutes,
+  normalizeAggregatePreRegistrationMaxSources,
   normalizeAggregateTimeoutSeconds,
   normalizeDisplayOrigin,
   normalizeUserKey,

@@ -12,12 +12,26 @@ const {
 } = require("./jsonStateFile");
 
 const aggregateCacheFile = path.join(dataDir, "aggregate-cache.json");
-const STATE_VERSION = 1;
+const STATE_VERSION = 2;
 let aggregateCacheMutationQueue = Promise.resolve();
 let aggregateCacheStatePromise = null;
 
 function cloneState(state) {
   return JSON.parse(JSON.stringify(state));
+}
+
+function toTimestamp(value) {
+  const timestamp = new Date(value || "").getTime();
+  return Number.isFinite(timestamp) ? timestamp : 0;
+}
+
+function normalizePositiveInteger(value, fallback = 0) {
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    return fallback;
+  }
+
+  return parsed;
 }
 
 function createEmptySchedulerState() {
@@ -40,10 +54,17 @@ function createEmptySchedulerState() {
   };
 }
 
+function createEmptyUserCacheState() {
+  return {
+    cacheEntries: {},
+    sourcePool: [],
+  };
+}
+
 function createBaseState() {
   const users = {};
   USER_KEYS.forEach((userKey) => {
-    users[userKey] = {};
+    users[userKey] = createEmptyUserCacheState();
   });
 
   return {
@@ -80,13 +101,43 @@ function normalizeSourceLabels(labels = []) {
     .filter(Boolean);
 }
 
-function normalizePositiveInteger(value, fallback = 0) {
-  const parsed = Number.parseInt(value, 10);
-  if (!Number.isFinite(parsed) || parsed < 0) {
-    return fallback;
+function normalizeClientUrls(clientUrls = {}) {
+  const source = clientUrls && typeof clientUrls === "object" ? clientUrls : {};
+  const result = {};
+
+  Object.entries(source).forEach(([key, value]) => {
+    const normalizedKey = (key || "").toString().trim();
+    const normalizedValue = (value || "").toString().trim();
+    if (!normalizedKey || !normalizedValue) {
+      return;
+    }
+
+    result[normalizedKey] = normalizedValue;
+  });
+
+  return result;
+}
+
+function normalizeSerializableRecord(record) {
+  if (!record || typeof record !== "object") {
+    return null;
   }
 
-  return parsed;
+  return cloneState(record);
+}
+
+function normalizeRegistrationRecord(record) {
+  const normalized = normalizeSerializableRecord(record);
+  if (!normalized) {
+    return null;
+  }
+
+  normalized.clientUrls = normalizeClientUrls(normalized.clientUrls);
+  return normalized;
+}
+
+function normalizeUsageRecord(record) {
+  return normalizeSerializableRecord(record);
 }
 
 function normalizeCacheEntry(type, entry) {
@@ -118,8 +169,8 @@ function normalizeCacheEntry(type, entry) {
   };
 }
 
-function normalizeUserCache(userCache = {}) {
-  const source = userCache && typeof userCache === "object" ? userCache : {};
+function normalizeCacheEntriesMap(entries = {}) {
+  const source = entries && typeof entries === "object" ? entries : {};
   const result = {};
 
   Object.entries(source).forEach(([type, entry]) => {
@@ -132,13 +183,77 @@ function normalizeUserCache(userCache = {}) {
   return result;
 }
 
+function normalizeSourcePoolEntry(entry) {
+  if (!entry || typeof entry !== "object") {
+    return null;
+  }
+
+  const upstreamId = (entry.upstreamId || entry.storageKey || "").toString().trim();
+  if (!upstreamId) {
+    return null;
+  }
+
+  const registration = normalizeRegistrationRecord(
+    entry.registration || entry.record || entry.latestRegistration,
+  );
+  if (!registration) {
+    return null;
+  }
+
+  const storageKey = (entry.storageKey || upstreamId).toString().trim() || upstreamId;
+  const savedAt =
+    (entry.savedAt || entry.createdAt || registration.createdAt || "").toString().trim();
+  const id = (entry.id || `${storageKey}:${savedAt || registration.email || ""}`).toString().trim();
+
+  return {
+    id: id || `${storageKey}:${registration.email || ""}`,
+    upstreamId,
+    storageKey,
+    instanceNumber: Math.max(1, normalizePositiveInteger(entry.instanceNumber, 1) || 1),
+    instanceLabel: (entry.instanceLabel || storageKey).toString().trim() || storageKey,
+    savedAt,
+    lastValidatedAt: (entry.lastValidatedAt || "").toString().trim(),
+    lastValidationError: (entry.lastValidationError || "").toString(),
+    registration,
+    latestUsage: normalizeUsageRecord(entry.latestUsage || entry.usage),
+  };
+}
+
+function normalizeSourcePool(entries = []) {
+  if (!Array.isArray(entries)) {
+    return [];
+  }
+
+  return entries
+    .map(normalizeSourcePoolEntry)
+    .filter(Boolean)
+    .sort((left, right) => {
+      const rightTime = toTimestamp(right.savedAt || right.registration?.createdAt || "");
+      const leftTime = toTimestamp(left.savedAt || left.registration?.createdAt || "");
+      return rightTime - leftTime;
+    });
+}
+
+function normalizeUserCacheState(userCache = {}) {
+  const source = userCache && typeof userCache === "object" ? userCache : {};
+  const hasStructuredShape =
+    Object.prototype.hasOwnProperty.call(source, "cacheEntries")
+    || Object.prototype.hasOwnProperty.call(source, "sourcePool");
+
+  return {
+    cacheEntries: normalizeCacheEntriesMap(hasStructuredShape ? source.cacheEntries : source),
+    sourcePool: normalizeSourcePool(source.sourcePool),
+  };
+}
+
 function normalizeSchedulerState(scheduler = {}) {
   const source = scheduler && typeof scheduler === "object" ? scheduler : {};
   const fallback = createEmptySchedulerState();
 
   return {
     enabled: Boolean(source.enabled),
-    intervalMinutes: normalizePositiveInteger(source.intervalMinutes, fallback.intervalMinutes) || fallback.intervalMinutes,
+    intervalMinutes:
+      normalizePositiveInteger(source.intervalMinutes, fallback.intervalMinutes) || fallback.intervalMinutes,
     running: Boolean(source.running),
     nextRunAt: (source.nextRunAt || "").toString().trim(),
     lastStartedAt: (source.lastStartedAt || "").toString().trim(),
@@ -163,7 +278,7 @@ function normalizeAggregateCacheState(parsed = {}) {
   const userKeys = Array.from(new Set([...USER_KEYS, ...Object.keys(sourceUsers)]));
 
   userKeys.forEach((userKey) => {
-    users[userKey] = normalizeUserCache(sourceUsers[userKey]);
+    users[userKey] = normalizeUserCacheState(sourceUsers[userKey]);
   });
 
   return {
@@ -234,24 +349,28 @@ async function updateAggregateCacheState(mutator) {
 
 async function getAggregateCacheEntry(userKey, type) {
   const state = await loadAggregateCacheState();
-  return state.users?.[userKey]?.[type] || null;
+  return state.users?.[userKey]?.cacheEntries?.[type] || null;
+}
+
+async function getAggregateCacheUserState(userKey) {
+  const state = await loadAggregateCacheState();
+  return state.users?.[userKey] || createEmptyUserCacheState();
+}
+
+async function replaceAggregateCacheUserState(userKey, userState = {}) {
+  return updateAggregateCacheState(async (state) => {
+    state.users[userKey] = normalizeUserCacheState(userState);
+  });
 }
 
 async function mergeAggregateCacheEntries(userKey, entries = {}) {
   return updateAggregateCacheState(async (state) => {
-    if (!state.users[userKey] || typeof state.users[userKey] !== "object") {
-      state.users[userKey] = {};
-    }
-
-    Object.entries(entries).forEach(([type, entry]) => {
-      const normalized = normalizeCacheEntry(type, entry);
-      if (normalized) {
-        state.users[userKey][type] = normalized;
-        return;
-      }
-
-      delete state.users[userKey][type];
-    });
+    const currentUserState = normalizeUserCacheState(state.users[userKey]);
+    currentUserState.cacheEntries = {
+      ...currentUserState.cacheEntries,
+      ...normalizeCacheEntriesMap(entries),
+    };
+    state.users[userKey] = currentUserState;
   });
 }
 
@@ -287,7 +406,9 @@ module.exports = {
   aggregateCacheFile,
   getAggregateCacheEntry,
   getAggregateCacheScheduler,
+  getAggregateCacheUserState,
   loadAggregateCacheState,
   mergeAggregateCacheEntries,
+  replaceAggregateCacheUserState,
   updateAggregateCacheScheduler,
 };

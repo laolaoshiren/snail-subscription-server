@@ -824,6 +824,7 @@ module.exports = {
   manualRegisterAggregateWithRuntime,
   manualRegisterWithRuntime,
   mergeRegistrationWithUsage,
+  queryCurrentUsage,
   resolveAggregateRelayStates,
   resolveAggregateViewStates,
   resolveRelayState,
