@@ -715,7 +715,7 @@ function buildMockResult(inviteCode = "") {
   const email = generateRandomEmail();
   const password = generateRandomPassword();
   const token = `mock-token-${Date.now()}`;
-  const subscribeUrl = `https://mock.snail.local/sub/${token}`;
+  const subscribeUrl = `https://mock.provider.local/sub/${token}`;
 
   return buildRegistrationResult({
     email,
@@ -724,7 +724,7 @@ function buildMockResult(inviteCode = "") {
     token,
     subscribeUrl,
     mock: true,
-    upstreamSite: "https://snaillink.com",
+    upstreamSite: "https://provider.example.com",
     apiBase: DEFAULT_API_BASE,
     entryUrl: process.env.UPSTREAM_ENTRY_URL || DEFAULT_UPSTREAM_ENTRY_URL,
     detectorConfigUrl: buildUrl(
@@ -772,7 +772,7 @@ async function registerAndFetchSubscribe(options = {}) {
   const password = generateRandomPassword();
 
   logger.log("==================================================");
-  logger.log("  SnailLink auto registration");
+  logger.log("  Provider auto registration");
   logger.log("==================================================");
 
   async function attemptRegistration(upstream) {

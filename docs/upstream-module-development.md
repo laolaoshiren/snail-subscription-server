@@ -1,4 +1,4 @@
-# 上游模块开发文档
+# 接入模块开发文档
 
 这份文档的目标只有一个：
 
@@ -113,7 +113,7 @@ module.exports = defineUpstreamModule({
 ```js
 manifest: {
   id: "my-provider",
-  label: "我的上游",
+  label: "我的模块",
   description: "一句话描述这个上游模块",
 }
 ```
@@ -154,7 +154,7 @@ manifest: {
   - 模块作者/维护者
 - `website`
   - 选填
-  - 上游官网
+  - 服务官网
 - `docsUrl`
   - 选填
   - 模块自己的外部文档地址
@@ -257,7 +257,7 @@ options: [
 ```js
 defaultConfig: {
   enabled: true,
-  name: "我的上游",
+  name: "我的模块",
   remark: "",
   runtimeMode: "always_refresh",
   trafficThresholdPercent: 20,
@@ -540,8 +540,8 @@ npm run upstreams:check
 输出示例：
 
 ```text
-- snail-default | 主上游 | api=1 | types=universal, clash, shadowrocket, surge, quantumultx, sing-box
-- my-provider | 我的上游 | api=1 | types=universal, clash
+- provider-a | 模块A | api=1 | types=universal, clash, shadowrocket, surge, quantumultx, sing-box
+- my-provider | 我的模块 | api=1 | types=universal, clash
 No upstream module diagnostics.
 ```
 
@@ -555,7 +555,7 @@ node scripts/check-upstreams.js src/upstreams/vendors/my-provider
 
 ```text
 Validated module: my-provider
-Label: 我的上游
+Label: 我的模块
 API version: 1
 Supported types: universal, clash
 Capabilities: query=true, inviteCode=false

@@ -19,7 +19,7 @@ function createSnailVendor(options = {}) {
       id: options.id,
       label: options.label,
       description: options.description || "",
-      author: options.author || "Snail",
+      author: options.author || "RelayHub",
       website: options.website || "",
       docsUrl: options.docsUrl || "",
       capabilities: options.capabilities,

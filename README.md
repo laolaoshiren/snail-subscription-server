@@ -1,11 +1,11 @@
-# 蜗牛助手订阅中转服务
+# RelayHub 订阅中转服务
 
 ## 一键安装
 
 生产服务器执行这一条命令即可完成安装或更新、写入 `systemd` 服务、设置开机自启并立即启动：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/laolaoshiren/snail-subscription-server/main/scripts/install.sh | sudo bash
+curl -fsSL <your-install-script-url> | sudo bash
 ```
 
 ## Docker 一键安装
@@ -13,7 +13,7 @@ curl -fsSL https://raw.githubusercontent.com/laolaoshiren/snail-subscription-ser
 如果你希望用 Docker 部署，执行这一条命令即可完成安装或更新、拉取镜像并启动容器：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/laolaoshiren/snail-subscription-server/main/scripts/docker-install.sh | sudo bash
+curl -fsSL <your-docker-install-script-url> | sudo bash
 ```
 
 脚本会交互式询问两项内容：
@@ -34,13 +34,13 @@ curl -fsSL https://raw.githubusercontent.com/laolaoshiren/snail-subscription-ser
 如果你不想交互，也可以通过环境变量直接传值：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/laolaoshiren/snail-subscription-server/main/scripts/install.sh | sudo env PANEL_PASSWORD='你的密码' PORT=3000 PROXY_URL=http://127.0.0.1:7890 INVITE_CODE=你的邀请码 bash
+curl -fsSL <your-install-script-url> | sudo env PANEL_PASSWORD='your-password' PORT=3000 PROXY_URL=http://127.0.0.1:7890 INVITE_CODE=your-invite-code bash
 ```
 
 Docker 模式同样支持环境变量直传：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/laolaoshiren/snail-subscription-server/main/scripts/docker-install.sh | sudo env PANEL_PASSWORD='你的密码' PORT=3000 PROXY_URL=http://127.0.0.1:7890 INVITE_CODE=你的邀请码 bash
+curl -fsSL <your-docker-install-script-url> | sudo env PANEL_PASSWORD='your-password' PORT=3000 PROXY_URL=http://127.0.0.1:7890 INVITE_CODE=your-invite-code bash
 ```
 
 ## 项目说明
@@ -61,9 +61,9 @@ curl -fsSL https://raw.githubusercontent.com/laolaoshiren/snail-subscription-ser
 一键安装脚本默认会完成这些动作：
 
 1. 安装 `curl`、`git`、`Node.js 20`。
-2. 把项目部署到 `/opt/snail-subscription-server`。
-3. 生成环境文件 `/etc/snail-subscription-server.env`。
-4. 创建 `systemd` 服务 `snail-subscription-server`。
+2. 把项目部署到 `/opt/relayhub`。
+3. 生成环境文件 `/etc/relayhub.env`。
+4. 创建 `systemd` 服务 `relayhub`。
 5. 执行开机自启并立即启动服务。
 6. 首次安装时写入你设置的面板密码，或自动生成随机密码。
 
@@ -78,7 +78,7 @@ curl -fsSL https://raw.githubusercontent.com/laolaoshiren/snail-subscription-ser
 默认镜像地址：
 
 ```text
-ghcr.io/laolaoshiren/snail-subscription-server:latest
+<your-image>:latest
 ```
 
 相关文件：
@@ -93,19 +93,19 @@ ghcr.io/laolaoshiren/snail-subscription-server:latest
 查看服务状态：
 
 ```bash
-sudo systemctl status snail-subscription-server
+sudo systemctl status relayhub
 ```
 
 查看实时日志：
 
 ```bash
-sudo journalctl -u snail-subscription-server -f
+sudo journalctl -u relayhub -f
 ```
 
 重启服务：
 
 ```bash
-sudo systemctl restart snail-subscription-server
+sudo systemctl restart relayhub
 ```
 
 ## 可选环境变量

@@ -701,7 +701,7 @@ function getRuntimeSelectionLabel(upstream = getActiveUpstream()) {
     return "聚合模式";
   }
 
-  return isPollingMode() ? "轮询模式" : upstream?.label || "主上游";
+  return isPollingMode() ? "轮询模式" : upstream?.label || "默认模块";
 }
 
 function getCurrentUser() {
@@ -1600,12 +1600,12 @@ function renderAppUpdateStatus() {
   } else if (status.checking) {
     stateText = "检查中";
     summary = "正在检查 GitHub 上的最新版本。";
-  } else if (!status.supported) {
-    stateText = "只读";
-    summary = "当前部署环境只能显示版本，不能直接在线更新。";
   } else if (status.lastError) {
-    stateText = "检查失败";
+    stateText = "\u68c0\u67e5\u5931\u8d25";
     summary = status.lastError;
+  } else if (!status.supported) {
+    stateText = "\u53ea\u8bfb";
+    summary = "\u5f53\u524d\u90e8\u7f72\u73af\u5883\u53ea\u80fd\u663e\u793a\u7248\u672c\uff0c\u4e0d\u80fd\u76f4\u63a5\u5728\u7ebf\u66f4\u65b0\u3002";
   } else if (status.updateAvailable) {
     stateText = "发现更新";
     summary = isDockerUpdate ? "检测到新镜像，点击后会自动拉取并重建容器。" : "检测到新版本，手动确认后才会开始更新。";
@@ -2520,10 +2520,16 @@ if (checkUpdateButton) {
       const payload = await requestJson("/api/system/check-update", { method: "POST" });
       state.appUpdate = payload.appUpdate || state.appUpdate;
       renderAppUpdateStatus();
-      setStatus(
-        payload.appUpdate?.updateAvailable ? "检测到新版本，可手动更新。" : "当前已经是最新版本。",
-        payload.appUpdate?.updateAvailable ? "warning" : "success",
-      );
+      if (payload.appUpdate?.lastError) {
+        setStatus(payload.appUpdate.lastError, "error");
+      } else if (!payload.appUpdate?.supported) {
+        setStatus("\u7248\u672c\u68c0\u67e5\u5df2\u4ee5\u53ea\u8bfb\u6a21\u5f0f\u5b8c\u6210\uff0c\u5f53\u524d\u73af\u5883\u4e0d\u652f\u6301\u81ea\u52a8\u66f4\u65b0\u3002", "warning");
+      } else {
+        setStatus(
+          payload.appUpdate?.updateAvailable ? "\u68c0\u6d4b\u5230\u65b0\u7248\u672c\uff0c\u53ef\u624b\u52a8\u66f4\u65b0\u3002" : "\u5f53\u524d\u5df2\u7ecf\u662f\u6700\u65b0\u7248\u672c\u3002",
+          payload.appUpdate?.updateAvailable ? "warning" : "success",
+        );
+      }
     } catch (error) {
       if (error.status === 401) {
         showLogin();
@@ -2547,11 +2553,13 @@ if (runUpdateButton) {
       const payload = await requestJson("/api/system/update", { method: "POST" });
       state.appUpdate = payload.appUpdate || state.appUpdate;
       renderAppUpdateStatus();
-      if (payload.restartRequired) {
-        setStatus("系统更新已完成，服务会自动重启。", "warning");
+      if (payload.appUpdate?.lastError) {
+        setStatus(payload.appUpdate.lastError, "error");
+      } else if (payload.restartRequired) {
+        setStatus("\u7cfb\u7edf\u66f4\u65b0\u5df2\u5b8c\u6210\uff0c\u670d\u52a1\u4f1a\u81ea\u52a8\u91cd\u542f\u3002", "warning");
         beginUpdateReconnectPolling();
       } else {
-        setStatus("当前已经是最新版本。", "success");
+        setStatus("\u5f53\u524d\u5df2\u7ecf\u662f\u6700\u65b0\u7248\u672c\u3002", "success");
       }
     } catch (error) {
       if (error.status === 401) {

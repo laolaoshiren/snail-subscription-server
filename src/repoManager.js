@@ -244,6 +244,48 @@ async function fetchReadonlyRemoteCommit(context) {
   return trimGitRefValue(payload?.sha || "");
 }
 
+async function buildReadonlyRemoteAppStatus(baseStatus, options = {}) {
+  const context = getReadonlyUpdateContext();
+  const [remotePackage, remoteCommit] = await Promise.all([
+    fetchReadonlyRemotePackageMeta(context),
+    fetchReadonlyRemoteCommit(context),
+  ]);
+  const checkedAt = new Date().toISOString();
+  const latestVersion =
+    trimGitRefValue(remotePackage?.version || "") || baseStatus.currentVersion || "0.0.0";
+  const latestCommitSha = trimGitRefValue(remoteCommit);
+  const updateAvailable = Boolean(
+    latestVersion !== baseStatus.currentVersion ||
+    (latestCommitSha && baseStatus.currentCommitSha && latestCommitSha !== baseStatus.currentCommitSha),
+  );
+
+  return {
+    ...baseStatus,
+    supported: options.supported ?? false,
+    mode: options.mode || "readonly",
+    checking: false,
+    checkedAt,
+    lastError: options.lastError || "",
+    source: {
+      remoteName: context.remoteName,
+      remoteLabel: context.remoteLabel,
+      branch: context.branch,
+    },
+    latest: {
+      version: latestVersion,
+      commit: latestCommitSha,
+      shortCommit: ensureShortCommit(latestCommitSha),
+    },
+    latestVersion,
+    latestCommitSha,
+    updateAvailable,
+    canFastForward: false,
+    hasLocalChanges: false,
+    commitsAhead: 0,
+    commitsBehind: 0,
+  };
+}
+
 function buildDefaultAppStatus(localInfo, systemState) {
   return {
     supported: true,
@@ -455,29 +497,10 @@ async function buildAppUpdateStatus(force = false) {
     };
 
     try {
-      const context = getReadonlyUpdateContext();
-      const [remotePackage, remoteCommit] = await Promise.all([
-        fetchReadonlyRemotePackageMeta(context),
-        fetchReadonlyRemoteCommit(context),
-      ]);
-      const checkedAt = new Date().toISOString();
-      const latestVersion = trimGitRefValue(remotePackage?.version || "") || fallback.currentVersion;
-      const latestCommitSha = trimGitRefValue(remoteCommit);
-      const updateAvailable =
-        latestVersion !== fallback.currentVersion ||
-        (latestCommitSha && fallback.currentCommitSha && latestCommitSha !== fallback.currentCommitSha);
-      const payload = {
-        ...fallback,
-        checkedAt,
-        latest: {
-          version: latestVersion,
-          commit: latestCommitSha,
-          shortCommit: ensureShortCommit(latestCommitSha),
-        },
-        latestVersion,
-        latestCommitSha,
-        updateAvailable,
-      };
+      const payload = await buildReadonlyRemoteAppStatus(fallback, {
+        supported: dockerSupported,
+        mode: readonlyMode,
+      });
       cacheState.appStatus = payload;
       cacheState.appStatusAt = Date.now();
       await updateSystemState({
@@ -491,7 +514,7 @@ async function buildAppUpdateStatus(force = false) {
           updateAvailable: payload.updateAvailable,
           checking: false,
           updating: false,
-          lastCheckedAt: checkedAt,
+          lastCheckedAt: payload.checkedAt,
           lastError: "",
         },
       });
@@ -599,24 +622,36 @@ async function buildAppUpdateStatus(force = false) {
     });
     return payload;
   } catch (error) {
-    const payload = {
+    let payload = {
       ...fallback,
       checking: false,
       lastError: error.message,
     };
+
+    try {
+      payload = await buildReadonlyRemoteAppStatus(payload, {
+        supported: false,
+        mode: "readonly",
+        lastError: error.message,
+      });
+    } catch {
+      // Keep the original git fallback when readonly metadata is also unavailable.
+    }
+
     cacheState.appStatus = payload;
     cacheState.appStatusAt = Date.now();
     await updateSystemState({
       appUpdate: {
-        supported: true,
+        supported: payload.supported,
+        mode: payload.mode,
         checking: false,
         currentVersion: payload.current.version,
         currentCommitSha: payload.current.commit,
         latestVersion: payload.latest.version,
         latestCommitSha: payload.latest.commit,
-        updateAvailable: false,
+        updateAvailable: payload.updateAvailable,
         lastCheckedAt: new Date().toISOString(),
-        lastError: error.message,
+        lastError: payload.lastError,
       },
     });
     return payload;

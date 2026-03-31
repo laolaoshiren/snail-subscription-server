@@ -17,26 +17,26 @@ dns:
     fake-ip-range: 198.18.0.1/16
     fake-ip-filter: ['*.lan', '*.localdomain', '*.example', '*.invalid', '*.localhost', '*.test', '*.local', '*.home.arpa', 'time.*.com', 'time.*.gov', 'time.*.edu.cn', 'time.*.apple.com', 'time1.*.com', 'time2.*.com', 'time3.*.com', 'time4.*.com', 'time5.*.com', 'time6.*.com', 'time7.*.com', 'ntp.*.com', 'ntp1.*.com', 'ntp2.*.com', 'ntp3.*.com', 'ntp4.*.com', 'ntp5.*.com', 'ntp6.*.com', 'ntp7.*.com', '*.time.edu.cn', '*.ntp.org.cn', +.pool.ntp.org, time1.cloud.tencent.com, 'stun.*.*', 'stun.*.*.*', swscan.apple.com, mesu.apple.com, music.163.com, '*.music.163.com', '*.126.net', musicapi.taihe.com, music.taihe.com, songsearch.kugou.com, trackercdn.kugou.com, '*.kuwo.cn', api-jooxtt.sanook.com, api.joox.com, y.qq.com, '*.y.qq.com', streamoc.music.tc.qq.com, mobileoc.music.tc.qq.com, isure.stream.qqmusic.qq.com, dl.stream.qqmusic.qq.com, aqqmusic.tc.qq.com, amobile.music.tc.qq.com, localhost.ptlogin2.qq.com, '*.msftconnecttest.com', '*.msftncsi.com', '*.xiami.com', '*.music.migu.cn', music.migu.cn, +.wotgame.cn, +.wggames.cn, +.wowsgame.cn, +.wargaming.net, '*.*.*.srv.nintendo.net', '*.*.stun.playstation.net', 'xbox.*.*.microsoft.com', '*.*.xboxlive.com', '*.ipv6.microsoft.com', 'teredo.*.*.*', 'teredo.*.*', speedtest.cros.wr.pvp.net, +.jjvip8.com, www.douyu.com, activityapi.huya.com, activityapi.huya.com.w.cdngslb.com, www.bilibili.com, api.bilibili.com, a.w.bilicdn1.com]
 proxies:
-    - { name: '🇭🇰 香港A-SS', type: ss, server: hka-shadowsocks.fastsnaillink.com, port: 20037, cipher: chacha20-ietf-poly1305, password: a3956191-2729-4503-a248-0af9df5b3600, udp: true }
-    - { name: '🇭🇰 香港B-SS', type: ss, server: hkb-shadowsocks.fastsnaillink.com, port: 20039, cipher: chacha20-ietf-poly1305, password: a3956191-2729-4503-a248-0af9df5b3600, udp: true }
-    - { name: '🇹🇼 台湾A-SS', type: ss, server: twa-shadowsocks.fastsnaillink.com, port: 20047, cipher: chacha20-ietf-poly1305, password: a3956191-2729-4503-a248-0af9df5b3600, udp: true }
-    - { name: '🇺🇸 美国 A-SS', type: ss, server: usa-shadowsocks.fastsnaillink.com, port: 20045, cipher: chacha20-ietf-poly1305, password: a3956191-2729-4503-a248-0af9df5b3600, udp: true }
-    - { name: '🇯🇵 日本B-SS', type: ss, server: jpb-shadowsocks.fastsnaillink.com, port: 20098, cipher: chacha20-ietf-poly1305, password: a3956191-2729-4503-a248-0af9df5b3600, udp: true }
-    - { name: '🇯🇵 日本C-SS', type: ss, server: jpc-shadowsocks.fastsnaillink.com, port: 20081, cipher: chacha20-ietf-poly1305, password: a3956191-2729-4503-a248-0af9df5b3600, udp: true }
-    - { name: '🇸🇬 新加坡A-SS', type: ss, server: sgp-shadowsocks.fastsnaillink.com, port: 20042, cipher: chacha20-ietf-poly1305, password: a3956191-2729-4503-a248-0af9df5b3600, udp: true }
-    - { name: '🇰🇷 韩国B-SS', type: ss, server: krb-shadowsocks.fastsnaillink.com, port: 20049, cipher: chacha20-ietf-poly1305, password: a3956191-2729-4503-a248-0af9df5b3600, udp: true }
-    - { name: '🇲🇾 马来西亚A-SS', type: ss, server: ml-shadowsocks.fastsnaillink.com, port: 20030, cipher: chacha20-ietf-poly1305, password: a3956191-2729-4503-a248-0af9df5b3600, udp: true }
-    - { name: '🇹🇭 泰国 A-SS', type: ss, server: tha-shadowsocks.fastsnaillink.com, port: 20046, cipher: chacha20-ietf-poly1305, password: a3956191-2729-4503-a248-0af9df5b3600, udp: true }
-    - { name: '🇮🇩 印尼A-SS', type: ss, server: id-shadowsocks.fastsnaillink.com, port: 20043, cipher: chacha20-ietf-poly1305, password: a3956191-2729-4503-a248-0af9df5b3600, udp: true }
-    - { name: '🇬🇧 英国 A-SS', type: ss, server: uka-shadowsocks.fastsnaillink.com, port: 20044, cipher: chacha20-ietf-poly1305, password: a3956191-2729-4503-a248-0af9df5b3600, udp: true }
-    - { name: '🇫🇷 法国 A-SS', type: ss, server: fr-shadowsocks.fastsnaillink.com, port: 20036, cipher: chacha20-ietf-poly1305, password: a3956191-2729-4503-a248-0af9df5b3600, udp: true }
-    - { name: '🇦🇺 澳大利亚 A-SS', type: ss, server: au-shadowsocks.fastsnaillink.com, port: 20031, cipher: chacha20-ietf-poly1305, password: a3956191-2729-4503-a248-0af9df5b3600, udp: true }
-    - { name: '🇨🇦 加拿大 A-SS', type: ss, server: ca-shadowsocks.fastsnaillink.com, port: 20033, cipher: chacha20-ietf-poly1305, password: a3956191-2729-4503-a248-0af9df5b3600, udp: true }
-    - { name: '🇵🇱 波兰 A-SS', type: ss, server: pl-shadowsocks.fastsnaillink.com, port: 20035, cipher: chacha20-ietf-poly1305, password: a3956191-2729-4503-a248-0af9df5b3600, udp: true }
-    - { name: '🇨🇭 瑞士 A-SS', type: ss, server: swa-shadowsocks.fastsnaillink.com, port: 20048, cipher: chacha20-ietf-poly1305, password: a3956191-2729-4503-a248-0af9df5b3600, udp: true }
-    - { name: '🇷🇺 俄罗斯 A-SS', type: ss, server: ru-shadowsocks.fastsnaillink.com, port: 20041, cipher: chacha20-ietf-poly1305, password: a3956191-2729-4503-a248-0af9df5b3600, udp: true }
-    - { name: '🇮🇳 印度 A-SS', type: ss, server: in-shadowsocks.fastsnaillink.com, port: 20040, cipher: chacha20-ietf-poly1305, password: a3956191-2729-4503-a248-0af9df5b3600, udp: true }
-    - { name: '🇵🇭 菲律宾-A-SS', type: ss, server: ph-shadowsocks.fastsnaillink.com, port: 20051, cipher: chacha20-ietf-poly1305, password: a3956191-2729-4503-a248-0af9df5b3600, udp: true }
+    - { name: '🇭🇰 香港A-SS', type: ss, server: placeholder-node.example.com, port: 20037, cipher: chacha20-ietf-poly1305, password: placeholder-password, udp: true }
+    - { name: '🇭🇰 香港B-SS', type: ss, server: placeholder-node.example.com, port: 20039, cipher: chacha20-ietf-poly1305, password: placeholder-password, udp: true }
+    - { name: '🇹🇼 台湾A-SS', type: ss, server: placeholder-node.example.com, port: 20047, cipher: chacha20-ietf-poly1305, password: placeholder-password, udp: true }
+    - { name: '🇺🇸 美国 A-SS', type: ss, server: placeholder-node.example.com, port: 20045, cipher: chacha20-ietf-poly1305, password: placeholder-password, udp: true }
+    - { name: '🇯🇵 日本B-SS', type: ss, server: placeholder-node.example.com, port: 20098, cipher: chacha20-ietf-poly1305, password: placeholder-password, udp: true }
+    - { name: '🇯🇵 日本C-SS', type: ss, server: placeholder-node.example.com, port: 20081, cipher: chacha20-ietf-poly1305, password: placeholder-password, udp: true }
+    - { name: '🇸🇬 新加坡A-SS', type: ss, server: placeholder-node.example.com, port: 20042, cipher: chacha20-ietf-poly1305, password: placeholder-password, udp: true }
+    - { name: '🇰🇷 韩国B-SS', type: ss, server: placeholder-node.example.com, port: 20049, cipher: chacha20-ietf-poly1305, password: placeholder-password, udp: true }
+    - { name: '🇲🇾 马来西亚A-SS', type: ss, server: placeholder-node.example.com, port: 20030, cipher: chacha20-ietf-poly1305, password: placeholder-password, udp: true }
+    - { name: '🇹🇭 泰国 A-SS', type: ss, server: placeholder-node.example.com, port: 20046, cipher: chacha20-ietf-poly1305, password: placeholder-password, udp: true }
+    - { name: '🇮🇩 印尼A-SS', type: ss, server: placeholder-node.example.com, port: 20043, cipher: chacha20-ietf-poly1305, password: placeholder-password, udp: true }
+    - { name: '🇬🇧 英国 A-SS', type: ss, server: placeholder-node.example.com, port: 20044, cipher: chacha20-ietf-poly1305, password: placeholder-password, udp: true }
+    - { name: '🇫🇷 法国 A-SS', type: ss, server: placeholder-node.example.com, port: 20036, cipher: chacha20-ietf-poly1305, password: placeholder-password, udp: true }
+    - { name: '🇦🇺 澳大利亚 A-SS', type: ss, server: placeholder-node.example.com, port: 20031, cipher: chacha20-ietf-poly1305, password: placeholder-password, udp: true }
+    - { name: '🇨🇦 加拿大 A-SS', type: ss, server: placeholder-node.example.com, port: 20033, cipher: chacha20-ietf-poly1305, password: placeholder-password, udp: true }
+    - { name: '🇵🇱 波兰 A-SS', type: ss, server: placeholder-node.example.com, port: 20035, cipher: chacha20-ietf-poly1305, password: placeholder-password, udp: true }
+    - { name: '🇨🇭 瑞士 A-SS', type: ss, server: placeholder-node.example.com, port: 20048, cipher: chacha20-ietf-poly1305, password: placeholder-password, udp: true }
+    - { name: '🇷🇺 俄罗斯 A-SS', type: ss, server: placeholder-node.example.com, port: 20041, cipher: chacha20-ietf-poly1305, password: placeholder-password, udp: true }
+    - { name: '🇮🇳 印度 A-SS', type: ss, server: placeholder-node.example.com, port: 20040, cipher: chacha20-ietf-poly1305, password: placeholder-password, udp: true }
+    - { name: '🇵🇭 菲律宾-A-SS', type: ss, server: placeholder-node.example.com, port: 20051, cipher: chacha20-ietf-poly1305, password: placeholder-password, udp: true }
 proxy-groups:
     - { name: '🔰 节点选择', type: select, proxies: ['♻️ 自动选择', '🎯 全球直连', '⚙️ 故障转移', '🇭🇰 香港A-SS', '🇭🇰 香港B-SS', '🇹🇼 台湾A-SS', '🇺🇸 美国 A-SS', '🇯🇵 日本B-SS', '🇯🇵 日本C-SS', '🇸🇬 新加坡A-SS', '🇰🇷 韩国B-SS', '🇲🇾 马来西亚A-SS', '🇹🇭 泰国 A-SS', '🇮🇩 印尼A-SS', '🇬🇧 英国 A-SS', '🇫🇷 法国 A-SS', '🇦🇺 澳大利亚 A-SS', '🇨🇦 加拿大 A-SS', '🇵🇱 波兰 A-SS', '🇨🇭 瑞士 A-SS', '🇷🇺 俄罗斯 A-SS', '🇮🇳 印度 A-SS', '🇵🇭 菲律宾-A-SS'] }
     - { name: '♻️ 自动选择', type: url-test, proxies: ['🇭🇰 香港A-SS', '🇭🇰 香港B-SS', '🇹🇼 台湾A-SS', '🇺🇸 美国 A-SS', '🇯🇵 日本B-SS', '🇯🇵 日本C-SS', '🇸🇬 新加坡A-SS', '🇰🇷 韩国B-SS', '🇲🇾 马来西亚A-SS', '🇹🇭 泰国 A-SS', '🇮🇩 印尼A-SS', '🇬🇧 英国 A-SS', '🇫🇷 法国 A-SS', '🇦🇺 澳大利亚 A-SS', '🇨🇦 加拿大 A-SS', '🇵🇱 波兰 A-SS', '🇨🇭 瑞士 A-SS', '🇷🇺 俄罗斯 A-SS', '🇮🇳 印度 A-SS', '🇵🇭 菲律宾-A-SS'], url: 'http://www.gstatic.com/generate_204', interval: 3600 }
@@ -60,7 +60,7 @@ proxy-groups:
     - { name: '⛔ Reject', type: select, proxies: [REJECT, '🎯 全球直连', '🔰 节点选择', '🇭🇰 香港A-SS', '🇭🇰 香港B-SS', '🇹🇼 台湾A-SS', '🇺🇸 美国 A-SS', '🇯🇵 日本B-SS', '🇯🇵 日本C-SS', '🇸🇬 新加坡A-SS', '🇰🇷 韩国B-SS', '🇲🇾 马来西亚A-SS', '🇹🇭 泰国 A-SS', '🇮🇩 印尼A-SS', '🇬🇧 英国 A-SS', '🇫🇷 法国 A-SS', '🇦🇺 澳大利亚 A-SS', '🇨🇦 加拿大 A-SS', '🇵🇱 波兰 A-SS', '🇨🇭 瑞士 A-SS', '🇷🇺 俄罗斯 A-SS', '🇮🇳 印度 A-SS', '🇵🇭 菲律宾-A-SS'] }
     - { name: '🐟 漏网之鱼', type: select, proxies: ['🔰 节点选择', '🎯 全球直连', '♻️ 自动选择', '⚙️ 故障转移', '🇭🇰 香港A-SS', '🇭🇰 香港B-SS', '🇹🇼 台湾A-SS', '🇺🇸 美国 A-SS', '🇯🇵 日本B-SS', '🇯🇵 日本C-SS', '🇸🇬 新加坡A-SS', '🇰🇷 韩国B-SS', '🇲🇾 马来西亚A-SS', '🇹🇭 泰国 A-SS', '🇮🇩 印尼A-SS', '🇬🇧 英国 A-SS', '🇫🇷 法国 A-SS', '🇦🇺 澳大利亚 A-SS', '🇨🇦 加拿大 A-SS', '🇵🇱 波兰 A-SS', '🇨🇭 瑞士 A-SS', '🇷🇺 俄罗斯 A-SS', '🇮🇳 印度 A-SS', '🇵🇭 菲律宾-A-SS'] }
 rules:
-    - 'DOMAIN,ap.apsnaillink.com,DIRECT'
+    - 'DOMAIN,provider.example.com,DIRECT'
     - 'DOMAIN-SUFFIX,acl4.ssr,🎯 全球直连'
     - 'DOMAIN-SUFFIX,ip6-localhost,🎯 全球直连'
     - 'DOMAIN-SUFFIX,ip6-loopback,🎯 全球直连'
