@@ -244,6 +244,83 @@ async function fetchReadonlyRemoteCommit(context) {
   return trimGitRefValue(payload?.sha || "");
 }
 
+async function inspectDockerImage(context) {
+  const result = await runCommand(context.command, [
+    ...context.commandArgs,
+    "image",
+    "inspect",
+    context.image,
+    "--format",
+    "{{json .}}",
+  ]);
+  const output = trimGitRefValue(result.stdout);
+  if (!output) {
+    throw new Error("Docker image inspection returned an empty result.");
+  }
+
+  try {
+    return JSON.parse(output);
+  } catch (error) {
+    throw new Error("Docker image inspection returned invalid JSON.");
+  }
+}
+
+async function buildDockerRemoteAppStatus(baseStatus, options = {}) {
+  const context = getDockerUpdateContext();
+  if (!context.image) {
+    throw new Error("Docker image is not configured.");
+  }
+
+  if (options.refresh !== false) {
+    await runCommand(context.command, [...context.commandArgs, "pull", context.image]);
+  }
+
+  const imageMeta = await inspectDockerImage(context);
+  const labels = imageMeta?.Config?.Labels && typeof imageMeta.Config.Labels === "object"
+    ? imageMeta.Config.Labels
+    : {};
+  const checkedAt = new Date().toISOString();
+  const latestCommitSha = trimGitRefValue(labels["org.opencontainers.image.revision"] || "");
+  const labeledVersion = trimGitRefValue(labels["org.opencontainers.image.version"] || "");
+  const latestVersion =
+    labeledVersion && labeledVersion.toLowerCase() !== "main"
+      ? labeledVersion
+      : baseStatus.currentVersion || "0.0.0";
+
+  if (!latestCommitSha) {
+    throw new Error("Docker image metadata is missing revision label.");
+  }
+
+  return {
+    ...baseStatus,
+    supported: true,
+    mode: "docker",
+    checking: false,
+    checkedAt,
+    lastError: options.lastError || "",
+    source: {
+      remoteName: "docker",
+      remoteLabel: context.image,
+      branch: DEFAULT_UPDATE_BRANCH,
+    },
+    latest: {
+      version: latestVersion,
+      commit: latestCommitSha,
+      shortCommit: ensureShortCommit(latestCommitSha),
+    },
+    latestVersion,
+    latestCommitSha,
+    updateAvailable: Boolean(
+      latestVersion !== baseStatus.currentVersion ||
+      (latestCommitSha && latestCommitSha !== baseStatus.currentCommitSha),
+    ),
+    canFastForward: false,
+    hasLocalChanges: false,
+    commitsAhead: 0,
+    commitsBehind: 0,
+  };
+}
+
 async function buildReadonlyRemoteAppStatus(baseStatus, options = {}) {
   const context = getReadonlyUpdateContext();
   const [remotePackage, remoteCommit] = await Promise.all([
@@ -497,16 +574,32 @@ async function buildAppUpdateStatus(force = false) {
     };
 
     try {
-      const payload = await buildReadonlyRemoteAppStatus(fallback, {
-        supported: dockerSupported,
-        mode: readonlyMode,
-      });
+      let payload;
+
+      if (dockerSupported) {
+        try {
+          payload = await buildDockerRemoteAppStatus(fallback, {
+            refresh: true,
+          });
+        } catch {
+          payload = await buildReadonlyRemoteAppStatus(fallback, {
+            supported: dockerSupported,
+            mode: readonlyMode,
+          });
+        }
+      } else {
+        payload = await buildReadonlyRemoteAppStatus(fallback, {
+          supported: dockerSupported,
+          mode: readonlyMode,
+        });
+      }
+
       cacheState.appStatus = payload;
       cacheState.appStatusAt = Date.now();
       await updateSystemState({
         appUpdate: {
-          supported: dockerSupported,
-          mode: readonlyMode,
+          supported: payload.supported,
+          mode: payload.mode,
           currentVersion: payload.currentVersion,
           currentCommitSha: payload.currentCommitSha,
           latestVersion: payload.latestVersion,
