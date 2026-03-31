@@ -2858,22 +2858,24 @@ async function tryServeAggregatePreRegistrationCache(response, request, type, re
 
   const configuredTargets = await getRuntimeAggregateTargets(type);
   const signature = buildAggregateTargetSignature(configuredTargets);
-  if (!signature) {
-    return false;
-  }
-
   const cacheEntry = await getAggregateCacheEntry(relayUser.key, type);
-  if (!cacheEntry || cacheEntry.signature !== signature || !cacheEntry.bodyBase64) {
+  const hasUsableCache = Boolean(cacheEntry?.bodyBase64);
+  const signatureMatches = Boolean(signature && cacheEntry?.signature === signature);
+
+  if (!hasUsableCache || !signatureMatches) {
     aggregatePreRegistrationImmediateRequested = true;
     scheduleAggregatePreRegistration().catch(() => undefined);
-    return false;
+  }
+
+  if (!hasUsableCache) {
+    sendEmptyAggregateSubscription(response, request, type, runtime);
+    return true;
   }
 
   const bodyBuffer = Buffer.from(cacheEntry.bodyBase64, "base64");
   if (bodyBuffer.length === 0) {
-    aggregatePreRegistrationImmediateRequested = true;
-    scheduleAggregatePreRegistration().catch(() => undefined);
-    return false;
+    sendEmptyAggregateSubscription(response, request, type, runtime);
+    return true;
   }
 
   sendSubscriptionPayload(
