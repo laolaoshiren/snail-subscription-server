@@ -2086,6 +2086,54 @@ function sendSubscriptionPayload(response, requestMethod, headers, bodyBuffer) {
   response.end(bodyBuffer);
 }
 
+function buildEmptyAggregateSubscriptionBody(type) {
+  if (type === "clash") {
+    return Buffer.from("proxies: []\n", "utf8");
+  }
+
+  if (type === "sing-box") {
+    return Buffer.from(
+      `${JSON.stringify(
+        {
+          outbounds: [],
+        },
+        null,
+        2,
+      )}\n`,
+      "utf8",
+    );
+  }
+
+  return Buffer.from("\n", "utf8");
+}
+
+function buildEmptyAggregateSubscriptionHeaders(type, runtime = {}) {
+  const preRegistration = getAggregatePreRegistrationSettings(runtime?.upstreamAggregation);
+
+  return {
+    "content-type": getContentTypeByRelayType(type, "text/plain; charset=utf-8"),
+    "profile-title": `RelayHub Aggregate ${type} Empty`,
+    "profile-update-interval": toProfileUpdateIntervalHours(preRegistration.intervalMinutes),
+  };
+}
+
+function shouldReturnEmptyAggregateSubscription(runtime = {}) {
+  const preRegistration = getAggregatePreRegistrationSettings(runtime?.upstreamAggregation);
+  return Boolean(
+    runtime?.activeUpstreamMode === ACTIVE_UPSTREAM_MODES.AGGREGATE
+    && preRegistration.enabled,
+  );
+}
+
+function sendEmptyAggregateSubscription(response, request, type, runtime = {}) {
+  sendSubscriptionPayload(
+    response,
+    request.method,
+    buildEmptyAggregateSubscriptionHeaders(type, runtime),
+    buildEmptyAggregateSubscriptionBody(type),
+  );
+}
+
 function validateSubscriptionPayload(type, bodyBuffer) {
   const rawBody = Buffer.isBuffer(bodyBuffer) ? bodyBuffer.toString("utf8") : "";
   const trimmedBody = rawBody.trim();
@@ -2305,6 +2353,7 @@ async function fetchResolvedSubscriptionSource(source, type, requestMethod = "GE
 async function proxyAggregateSubscription(response, request, type, relayUser, runtime) {
   const aggregateTimeoutMs = getAggregateTimeoutMs(runtime?.upstreamAggregation);
   const aggregateTimeoutSeconds = getAggregateTimeoutSeconds(runtime?.upstreamAggregation);
+  const allowEmptyFallback = shouldReturnEmptyAggregateSubscription(runtime);
   const deadlineAt = Date.now() + aggregateTimeoutMs;
   const aggregateTargets = await getRuntimeAggregateTargets(type);
   const aggregateResult = await collectAggregateExecutionResults(
@@ -2362,6 +2411,11 @@ async function proxyAggregateSubscription(response, request, type, relayUser, ru
   );
 
   if (aggregateResult.targets.length === 0) {
+    if (allowEmptyFallback) {
+      sendEmptyAggregateSubscription(response, request, type, runtime);
+      return;
+    }
+
     sendText(response, 503, "No aggregate upstream is available.");
     return;
   }
@@ -2397,6 +2451,11 @@ async function proxyAggregateSubscription(response, request, type, relayUser, ru
   });
 
   if (successfulFetches.length === 0) {
+    if (allowEmptyFallback) {
+      sendEmptyAggregateSubscription(response, request, type, runtime);
+      return;
+    }
+
     sendText(
       response,
       aggregateResult.timedOut ? 504 : 502,
