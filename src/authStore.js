@@ -42,6 +42,8 @@ const ACTIVE_UPSTREAM_MODES = Object.freeze({
 const MAX_AGGREGATE_COPIES = 10;
 const DEFAULT_AGGREGATE_TIMEOUT_SECONDS = 15;
 const MAX_AGGREGATE_TIMEOUT_SECONDS = 120;
+const DEFAULT_AGGREGATE_PREREGISTRATION_INTERVAL_MINUTES = 60;
+const MAX_AGGREGATE_PREREGISTRATION_INTERVAL_MINUTES = 1440;
 let securityStateMutationQueue = Promise.resolve();
 const DEFAULT_UPSTREAM_CLOUD = Object.freeze({
   enabled: true,
@@ -54,6 +56,10 @@ const DEFAULT_UPSTREAM_CLOUD = Object.freeze({
 const DEFAULT_UPSTREAM_AGGREGATION = Object.freeze({
   counts: {},
   timeoutSeconds: DEFAULT_AGGREGATE_TIMEOUT_SECONDS,
+  preRegistration: Object.freeze({
+    enabled: false,
+    intervalMinutes: DEFAULT_AGGREGATE_PREREGISTRATION_INTERVAL_MINUTES,
+  }),
 });
 
 function hashPassword(password, salt) {
@@ -167,6 +173,30 @@ function normalizeAggregateTimeoutSeconds(value, fallback = DEFAULT_AGGREGATE_TI
   return Math.min(MAX_AGGREGATE_TIMEOUT_SECONDS, parsed);
 }
 
+function normalizeAggregatePreRegistrationIntervalMinutes(
+  value,
+  fallback = DEFAULT_AGGREGATE_PREREGISTRATION_INTERVAL_MINUTES,
+) {
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return fallback;
+  }
+
+  return Math.min(MAX_AGGREGATE_PREREGISTRATION_INTERVAL_MINUTES, parsed);
+}
+
+function normalizeAggregatePreRegistration(input = {}) {
+  const source = input && typeof input === "object" ? input : {};
+
+  return {
+    enabled: Boolean(source.enabled),
+    intervalMinutes: normalizeAggregatePreRegistrationIntervalMinutes(
+      source.intervalMinutes,
+      DEFAULT_UPSTREAM_AGGREGATION.preRegistration.intervalMinutes,
+    ),
+  };
+}
+
 function normalizeUpstreamConfigs(rawUpstreams, legacyRuntimeMode) {
   const source = rawUpstreams && typeof rawUpstreams === "object" ? rawUpstreams : {};
   const result = {};
@@ -259,6 +289,7 @@ function normalizeUpstreamAggregation(input = {}, upstreams = {}, upstreamOrder 
     source.timeoutSeconds,
     DEFAULT_UPSTREAM_AGGREGATION.timeoutSeconds,
   );
+  const preRegistration = normalizeAggregatePreRegistration(source.preRegistration);
   const orderedIds = normalizeUpstreamOrder(upstreamOrder, upstreams);
   const counts = {};
 
@@ -270,6 +301,7 @@ function normalizeUpstreamAggregation(input = {}, upstreams = {}, upstreamOrder 
     return {
       counts,
       timeoutSeconds,
+      preRegistration,
     };
   }
 
@@ -287,6 +319,7 @@ function normalizeUpstreamAggregation(input = {}, upstreams = {}, upstreamOrder 
   return {
     counts,
     timeoutSeconds,
+    preRegistration,
   };
 }
 
@@ -706,9 +739,11 @@ async function updatePanelSettings(settings = {}) {
 
 module.exports = {
   ACTIVE_UPSTREAM_MODES,
+  DEFAULT_AGGREGATE_PREREGISTRATION_INTERVAL_MINUTES,
   DEFAULT_AGGREGATE_TIMEOUT_SECONDS,
   DEFAULT_PASSWORD,
   DEFAULT_USER_KEY,
+  MAX_AGGREGATE_PREREGISTRATION_INTERVAL_MINUTES,
   MAX_AGGREGATE_COPIES,
   RELAY_USERS,
   RUNTIME_MODES,
@@ -724,6 +759,7 @@ module.exports = {
   listRelayUsers,
   listUpstreamConfigs,
   loadSecurityState,
+  normalizeAggregatePreRegistrationIntervalMinutes,
   normalizeAggregateTimeoutSeconds,
   normalizeDisplayOrigin,
   normalizeUserKey,

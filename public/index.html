@@ -291,6 +291,30 @@
                         <input id="aggregateTimeoutSeconds" name="aggregateTimeoutSeconds" type="number" min="1" max="120" step="1" value="15" />
                       </label>
 
+                      <div class="aggregate-settings-grid">
+                        <label class="checkbox-row aggregate-checkbox-row">
+                          <input id="aggregatePreRegistrationEnabled" name="aggregatePreRegistrationEnabled" type="checkbox" />
+                          <span>开启缓存预注册</span>
+                        </label>
+
+                        <label class="aggregate-timeout-field">
+                          <span>预注册周期（分钟）</span>
+                          <input
+                            id="aggregatePreRegistrationIntervalMinutes"
+                            name="aggregatePreRegistrationIntervalMinutes"
+                            type="number"
+                            min="1"
+                            max="1440"
+                            step="1"
+                            value="60"
+                          />
+                        </label>
+                      </div>
+
+                      <p id="aggregatePreRegistrationStatus" class="form-hint">
+                        关闭后将保持实时聚合，下游请求会现场注册并拉取上游订阅。
+                      </p>
+
                       <div id="aggregateList" class="aggregate-list"></div>
 
                       <div class="inline-actions">

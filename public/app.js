@@ -25,6 +25,9 @@ const aggregateForm = document.querySelector("#aggregateForm");
 const aggregateList = document.querySelector("#aggregateList");
 const aggregateSummary = document.querySelector("#aggregateSummary");
 const aggregateTimeoutSecondsInput = document.querySelector("#aggregateTimeoutSeconds");
+const aggregatePreRegistrationEnabledInput = document.querySelector("#aggregatePreRegistrationEnabled");
+const aggregatePreRegistrationIntervalMinutesInput = document.querySelector("#aggregatePreRegistrationIntervalMinutes");
+const aggregatePreRegistrationStatus = document.querySelector("#aggregatePreRegistrationStatus");
 const saveAggregateButton = document.querySelector("#saveAggregateButton");
 
 const statusBar = document.querySelector("#statusBar");
@@ -132,6 +135,27 @@ const state = {
   upstreamAggregation: {
     counts: {},
     timeoutSeconds: 15,
+    preRegistration: {
+      enabled: false,
+      intervalMinutes: 60,
+    },
+  },
+  aggregatePreRegistrationStatus: {
+    enabled: false,
+    intervalMinutes: 60,
+    running: false,
+    nextRunAt: "",
+    lastStartedAt: "",
+    lastCompletedAt: "",
+    lastSuccessfulAt: "",
+    lastError: "",
+    lastDurationMs: 0,
+    lastRun: {
+      userCount: 0,
+      cacheCount: 0,
+      sourceCount: 0,
+      failureCount: 0,
+    },
   },
   selectedUpstreamId: "",
   currentTab: "subscription",
@@ -525,6 +549,15 @@ function normalizeAggregateTimeoutSeconds(value, fallback = 15) {
   return Math.min(parsed, 120);
 }
 
+function normalizeAggregatePreRegistrationIntervalMinutes(value, fallback = 60) {
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return fallback;
+  }
+
+  return Math.min(parsed, 1440);
+}
+
 function getStoredAggregateTimeoutSeconds() {
   return normalizeAggregateTimeoutSeconds(state.upstreamAggregation?.timeoutSeconds, 15);
 }
@@ -541,6 +574,39 @@ function getAggregateTimeoutSeconds(preferInput = true) {
   }
 
   return normalizeAggregateTimeoutSeconds(rawValue, fallback);
+}
+
+function getStoredAggregatePreRegistrationEnabled() {
+  return Boolean(state.upstreamAggregation?.preRegistration?.enabled);
+}
+
+function getStoredAggregatePreRegistrationIntervalMinutes() {
+  return normalizeAggregatePreRegistrationIntervalMinutes(
+    state.upstreamAggregation?.preRegistration?.intervalMinutes,
+    60,
+  );
+}
+
+function getAggregatePreRegistrationEnabled(preferInput = true) {
+  if (!preferInput || !aggregatePreRegistrationEnabledInput) {
+    return getStoredAggregatePreRegistrationEnabled();
+  }
+
+  return Boolean(aggregatePreRegistrationEnabledInput.checked);
+}
+
+function getAggregatePreRegistrationIntervalMinutes(preferInput = true) {
+  const fallback = getStoredAggregatePreRegistrationIntervalMinutes();
+  if (!preferInput || !aggregatePreRegistrationIntervalMinutesInput) {
+    return fallback;
+  }
+
+  const rawValue = (aggregatePreRegistrationIntervalMinutesInput.value || "").toString().trim();
+  if (!rawValue) {
+    return fallback;
+  }
+
+  return normalizeAggregatePreRegistrationIntervalMinutes(rawValue, fallback);
 }
 
 function getAggregateSelectionLabel(counts = state.upstreamAggregation?.counts || {}) {
@@ -581,12 +647,21 @@ function renderAggregateSummary(counts = collectAggregateCountsFromForm()) {
   }
 
   const selectionLabel = getAggregateSelectionLabel(counts) || "未选择上游";
-  setText(aggregateSummary, `${selectionLabel} · ${getAggregateTimeoutSeconds()} 秒超时`);
+  const preRegistrationLabel = getAggregatePreRegistrationEnabled()
+    ? `缓存预注册 ${getAggregatePreRegistrationIntervalMinutes()} 分钟`
+    : "实时聚合";
+  setText(
+    aggregateSummary,
+    `${selectionLabel} · ${getAggregateTimeoutSeconds()} 秒超时 · ${preRegistrationLabel}`,
+  );
 }
 
 function getAggregateConfigSummary(counts = state.upstreamAggregation?.counts || {}) {
   const selectionLabel = getAggregateSelectionLabel(counts) || "点击配置聚合上游";
-  return `${selectionLabel} · ${getStoredAggregateTimeoutSeconds()} 秒`;
+  const preRegistrationLabel = getStoredAggregatePreRegistrationEnabled()
+    ? `缓存 ${getStoredAggregatePreRegistrationIntervalMinutes()} 分钟`
+    : "实时";
+  return `${selectionLabel} · ${getStoredAggregateTimeoutSeconds()} 秒 · ${preRegistrationLabel}`;
 }
 
 function getRuntimeSelectionLabel(upstream = getActiveUpstream()) {
@@ -657,6 +732,70 @@ function formatDateTime(value) {
   }
 
   return date.toLocaleString();
+}
+
+function normalizeAggregatePreRegistrationStatus(status = {}) {
+  const source = status && typeof status === "object" ? status : {};
+
+  return {
+    enabled: Boolean(source.enabled),
+    intervalMinutes: normalizeAggregatePreRegistrationIntervalMinutes(source.intervalMinutes, 60),
+    running: Boolean(source.running),
+    nextRunAt: (source.nextRunAt || "").toString(),
+    lastStartedAt: (source.lastStartedAt || "").toString(),
+    lastCompletedAt: (source.lastCompletedAt || "").toString(),
+    lastSuccessfulAt: (source.lastSuccessfulAt || "").toString(),
+    lastError: (source.lastError || "").toString(),
+    lastDurationMs: Number.isFinite(Number(source.lastDurationMs)) ? Number(source.lastDurationMs) : 0,
+    lastRun: {
+      userCount: Number.isFinite(Number(source.lastRun?.userCount)) ? Number(source.lastRun.userCount) : 0,
+      cacheCount: Number.isFinite(Number(source.lastRun?.cacheCount)) ? Number(source.lastRun.cacheCount) : 0,
+      sourceCount: Number.isFinite(Number(source.lastRun?.sourceCount)) ? Number(source.lastRun.sourceCount) : 0,
+      failureCount: Number.isFinite(Number(source.lastRun?.failureCount)) ? Number(source.lastRun.failureCount) : 0,
+    },
+  };
+}
+
+function renderAggregatePreRegistrationStatus() {
+  if (!aggregatePreRegistrationStatus) {
+    return;
+  }
+
+  const status = normalizeAggregatePreRegistrationStatus(state.aggregatePreRegistrationStatus);
+  state.aggregatePreRegistrationStatus = status;
+
+  if (!getStoredAggregatePreRegistrationEnabled()) {
+    aggregatePreRegistrationStatus.textContent = "关闭后将保持实时聚合，下游请求会现场注册并拉取上游订阅。";
+    return;
+  }
+
+  if (!status.enabled) {
+    aggregatePreRegistrationStatus.textContent = "已开启缓存预注册，但当前运行模式不是聚合模式或没有可用上游，调度不会执行。";
+    return;
+  }
+
+  if (status.running) {
+    aggregatePreRegistrationStatus.textContent = `后台预注册正在执行，上次完成：${formatDateTime(
+      status.lastCompletedAt,
+    )}。`;
+    return;
+  }
+
+  if (status.lastSuccessfulAt) {
+    aggregatePreRegistrationStatus.textContent =
+      `最近成功：${formatDateTime(status.lastSuccessfulAt)}，下次执行：${formatDateTime(
+        status.nextRunAt,
+      )}，最近生成 ${status.lastRun.cacheCount || 0} 份缓存，合并 ${status.lastRun.sourceCount || 0} 路上游。`;
+    return;
+  }
+
+  if (status.lastError) {
+    aggregatePreRegistrationStatus.textContent = `暂未生成可用缓存：${status.lastError}`;
+    return;
+  }
+
+  aggregatePreRegistrationStatus.textContent =
+    `已开启缓存预注册，首次任务将在 ${formatDateTime(status.nextRunAt)} 执行。`;
 }
 
 function formatCommit(value) {
@@ -896,6 +1035,15 @@ function renderAggregateEditor() {
   if (aggregateTimeoutSecondsInput) {
     aggregateTimeoutSecondsInput.value = String(getStoredAggregateTimeoutSeconds());
   }
+  if (aggregatePreRegistrationEnabledInput) {
+    aggregatePreRegistrationEnabledInput.checked = getStoredAggregatePreRegistrationEnabled();
+  }
+  if (aggregatePreRegistrationIntervalMinutesInput) {
+    aggregatePreRegistrationIntervalMinutesInput.value = String(
+      getStoredAggregatePreRegistrationIntervalMinutes(),
+    );
+    aggregatePreRegistrationIntervalMinutesInput.disabled = !getStoredAggregatePreRegistrationEnabled();
+  }
 
   aggregateList.innerHTML = "";
 
@@ -955,6 +1103,7 @@ function renderAggregateEditor() {
   });
 
   renderAggregateSummary();
+  renderAggregatePreRegistrationStatus();
 }
 
 function fillMeta(registration) {
@@ -1712,10 +1861,34 @@ function applySession(payload) {
   state.upstreamAggregation =
     payload.upstreamAggregation && typeof payload.upstreamAggregation === "object"
       ? payload.upstreamAggregation
-      : { counts: {}, timeoutSeconds: 15 };
+      : {
+          counts: {},
+          timeoutSeconds: 15,
+          preRegistration: {
+            enabled: false,
+            intervalMinutes: 60,
+          },
+        };
   state.upstreamAggregation.timeoutSeconds = normalizeAggregateTimeoutSeconds(
     state.upstreamAggregation.timeoutSeconds,
     15,
+  );
+  state.upstreamAggregation.preRegistration =
+    state.upstreamAggregation.preRegistration && typeof state.upstreamAggregation.preRegistration === "object"
+      ? state.upstreamAggregation.preRegistration
+      : {
+          enabled: false,
+          intervalMinutes: 60,
+        };
+  state.upstreamAggregation.preRegistration.enabled = Boolean(
+    state.upstreamAggregation.preRegistration.enabled,
+  );
+  state.upstreamAggregation.preRegistration.intervalMinutes = normalizeAggregatePreRegistrationIntervalMinutes(
+    state.upstreamAggregation.preRegistration.intervalMinutes,
+    60,
+  );
+  state.aggregatePreRegistrationStatus = normalizeAggregatePreRegistrationStatus(
+    payload.aggregatePreRegistrationStatus,
   );
   state.relayUrlsByUser = payload.relayUrlsByUser || {};
   state.userSummaries = Array.isArray(payload.userSummaries) ? payload.userSummaries : [];
@@ -2143,6 +2316,22 @@ if (aggregateForm) {
     );
     renderAggregateSummary();
   });
+  aggregatePreRegistrationEnabledInput?.addEventListener("change", () => {
+    if (aggregatePreRegistrationIntervalMinutesInput) {
+      aggregatePreRegistrationIntervalMinutesInput.disabled = !aggregatePreRegistrationEnabledInput.checked;
+    }
+    renderAggregateSummary();
+    renderAggregatePreRegistrationStatus();
+  });
+  aggregatePreRegistrationIntervalMinutesInput?.addEventListener("input", () => {
+    aggregatePreRegistrationIntervalMinutesInput.value = String(
+      normalizeAggregatePreRegistrationIntervalMinutes(
+        aggregatePreRegistrationIntervalMinutesInput.value,
+        60,
+      ),
+    );
+    renderAggregateSummary();
+  });
 
   aggregateForm.addEventListener("submit", async (event) => {
     event.preventDefault();
@@ -2151,6 +2340,11 @@ if (aggregateForm) {
 
     const counts = collectAggregateCountsFromForm();
     const timeoutSeconds = normalizeAggregateTimeoutSeconds(aggregateTimeoutSecondsInput?.value, 15);
+    const preRegistrationEnabled = getAggregatePreRegistrationEnabled();
+    const preRegistrationIntervalMinutes = normalizeAggregatePreRegistrationIntervalMinutes(
+      aggregatePreRegistrationIntervalMinutesInput?.value,
+      60,
+    );
 
     try {
       const payload = await requestJson("/api/settings", {
@@ -2159,6 +2353,10 @@ if (aggregateForm) {
           upstreamAggregation: {
             counts,
             timeoutSeconds,
+            preRegistration: {
+              enabled: preRegistrationEnabled,
+              intervalMinutes: preRegistrationIntervalMinutes,
+            },
           },
         }),
       });
@@ -2169,14 +2367,37 @@ if (aggregateForm) {
           : {
               counts,
               timeoutSeconds,
+              preRegistration: {
+                enabled: preRegistrationEnabled,
+                intervalMinutes: preRegistrationIntervalMinutes,
+              },
             };
       state.upstreamAggregation.timeoutSeconds = getStoredAggregateTimeoutSeconds();
+      state.upstreamAggregation.preRegistration =
+        state.upstreamAggregation.preRegistration && typeof state.upstreamAggregation.preRegistration === "object"
+          ? state.upstreamAggregation.preRegistration
+          : {
+              enabled: preRegistrationEnabled,
+              intervalMinutes: preRegistrationIntervalMinutes,
+            };
+      state.upstreamAggregation.preRegistration.enabled = Boolean(
+        state.upstreamAggregation.preRegistration.enabled,
+      );
+      state.upstreamAggregation.preRegistration.intervalMinutes = getStoredAggregatePreRegistrationIntervalMinutes();
+      state.aggregatePreRegistrationStatus = normalizeAggregatePreRegistrationStatus(
+        payload.aggregatePreRegistrationStatus,
+      );
       renderUpstreamSwitcher();
       renderUpstreamList();
       renderAggregateEditor();
       renderAggregateSummary();
       syncUpstreamForm();
-      setStatus(`聚合配置已保存：${getAggregateConfigSummary(counts)}。`, "success");
+      setStatus(
+        preRegistrationEnabled
+          ? `聚合配置已保存：${getAggregateConfigSummary(counts)}，后台已开始预热缓存。`
+          : `聚合配置已保存：${getAggregateConfigSummary(counts)}。`,
+        "success",
+      );
     } catch (error) {
       if (error.status === 401) {
         showLogin();
@@ -2420,3 +2641,4 @@ if (upstreamSwitcher) {
 }
 
 refreshSession();
+

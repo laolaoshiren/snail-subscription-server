@@ -790,6 +790,9 @@ async function manualRegisterAggregateWithRuntime(userKey, options = {}) {
         ...options,
         ...target,
       }),
+    {
+      timeoutSeconds: options.timeoutSeconds,
+    },
   );
 
   for (const failure of failures) {

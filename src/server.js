@@ -8,9 +8,16 @@ const { URL } = require("node:url");
 const QRCode = require("qrcode");
 const yaml = require("js-yaml");
 
+const {
+  getAggregateCacheEntry,
+  getAggregateCacheScheduler,
+  mergeAggregateCacheEntries,
+  updateAggregateCacheScheduler,
+} = require("./aggregateCacheStore");
 const { ensureProxyConfigured } = require("./httpClient");
 const {
   ACTIVE_UPSTREAM_MODES,
+  DEFAULT_AGGREGATE_PREREGISTRATION_INTERVAL_MINUTES,
   DEFAULT_AGGREGATE_TIMEOUT_SECONDS,
   DEFAULT_PASSWORD,
   DEFAULT_USER_KEY,
@@ -73,6 +80,9 @@ const SESSION_TTL_MS = 1000 * 60 * 60 * 12;
 const RELAY_FETCH_TIMEOUT_MS = Number.parseInt(process.env.RELAY_FETCH_TIMEOUT_MS || "30000", 10);
 const publicDir = path.join(__dirname, "..", "public");
 const sessions = new Map();
+let aggregatePreRegistrationTimer = null;
+let aggregatePreRegistrationJob = null;
+let aggregatePreRegistrationImmediateRequested = false;
 
 const RELAY_TYPES = Object.keys(URL_TYPES);
 const SUPPORTED_TYPES = new Set(["full", ...RELAY_TYPES]);
@@ -1716,6 +1726,31 @@ function getAggregateTimeoutMs(upstreamAggregation = {}) {
   return getAggregateTimeoutSeconds(upstreamAggregation) * 1000;
 }
 
+function getAggregatePreRegistrationSettings(upstreamAggregation = {}) {
+  const source =
+    upstreamAggregation?.preRegistration && typeof upstreamAggregation.preRegistration === "object"
+      ? upstreamAggregation.preRegistration
+      : {};
+
+  return {
+    enabled: Boolean(source.enabled),
+    intervalMinutes: Math.max(
+      1,
+      normalizeSubscriptionUpdateIntervalMinutes(
+        source.intervalMinutes,
+        DEFAULT_AGGREGATE_PREREGISTRATION_INTERVAL_MINUTES,
+      ),
+    ),
+  };
+}
+
+function buildAggregateTargetSignature(targets = []) {
+  return (Array.isArray(targets) ? targets : [])
+    .map((target) => target?.storageKey || target?.upstreamId || "")
+    .filter(Boolean)
+    .join("|");
+}
+
 function buildAggregateExecutionKey(target = {}) {
   return target.storageKey || `${target.upstreamId || "upstream"}:${target.instanceNumber || 1}`;
 }
@@ -1998,6 +2033,57 @@ function getContentTypeByRelayType(type, fallback = "text/plain; charset=utf-8")
     return "application/json; charset=utf-8";
   }
   return fallback;
+}
+
+function buildAggregateMergedHeaders(type, successfulFetches = [], title = "") {
+  const mergedIntervalHours = toProfileUpdateIntervalHours(
+    getAggregateRuntimeIntervalMinutes(successfulFetches.map((entry) => entry.target)),
+  );
+  const headers = {
+    "content-type": getContentTypeByRelayType(
+      type,
+      successfulFetches[0]?.payload?.headers?.["content-type"] || "text/plain; charset=utf-8",
+    ),
+    "profile-title": title || `RelayHub Aggregate ${type}`,
+    "profile-update-interval": mergedIntervalHours,
+  };
+  const mergedUserInfo = pickAggregateSubscriptionUserInfoHeader(successfulFetches);
+
+  if (mergedUserInfo) {
+    headers["subscription-userinfo"] = mergedUserInfo;
+  }
+
+  return headers;
+}
+
+async function buildAggregateMergedBody(type, successfulFetches = [], options = {}) {
+  const clashTemplate =
+    type === "clash" && options.stripRules !== true ? await loadAggregateClashTemplate() : null;
+  const mergedBody = sanitizeSubscriptionBody(
+    mergeSubscriptionBodies(
+      type,
+      successfulFetches.map((entry) => ({
+        body: entry.payload.body,
+        sourceLabel: entry.target.instanceLabel || entry.target.upstreamId,
+      })),
+      {
+        clashTemplate,
+      },
+    ),
+  );
+
+  validateSubscriptionPayload(type, mergedBody);
+  return mergedBody;
+}
+
+function sendSubscriptionPayload(response, requestMethod, headers, bodyBuffer) {
+  response.writeHead(200, headers);
+  if (requestMethod === "HEAD") {
+    response.end();
+    return;
+  }
+
+  response.end(bodyBuffer);
 }
 
 function validateSubscriptionPayload(type, bodyBuffer) {
@@ -2319,43 +2405,13 @@ async function proxyAggregateSubscription(response, request, type, relayUser, ru
     return;
   }
 
-  const mergedIntervalHours = toProfileUpdateIntervalHours(
-    getAggregateRuntimeIntervalMinutes(successfulFetches.map((entry) => entry.target)),
+  const mergedHeaders = buildAggregateMergedHeaders(
+    type,
+    successfulFetches,
+    `RelayHub Aggregate ${type}`,
   );
-  const mergedHeaders = {
-    "content-type": getContentTypeByRelayType(
-      type,
-      successfulFetches[0]?.payload?.headers?.["content-type"] || "text/plain; charset=utf-8",
-    ),
-    "profile-title": `RelayHub Aggregate ${type}`,
-    "profile-update-interval": mergedIntervalHours,
-  };
-  const mergedUserInfo = pickAggregateSubscriptionUserInfoHeader(successfulFetches);
-  if (mergedUserInfo) {
-    mergedHeaders["subscription-userinfo"] = mergedUserInfo;
-  }
-
-  response.writeHead(200, mergedHeaders);
-  if (request.method === "HEAD") {
-    response.end();
-    return;
-  }
-
-  const clashTemplate = type === "clash" ? await loadAggregateClashTemplate() : null;
-  const mergedBody = sanitizeSubscriptionBody(
-    mergeSubscriptionBodies(
-      type,
-      successfulFetches.map((entry) => ({
-        body: entry.payload.body,
-        sourceLabel: entry.target.instanceLabel || entry.target.upstreamId,
-      })),
-      {
-        clashTemplate,
-      },
-    ),
-  );
-  validateSubscriptionPayload(type, mergedBody);
-  response.end(mergedBody);
+  const mergedBody = await buildAggregateMergedBody(type, successfulFetches);
+  sendSubscriptionPayload(response, request.method, mergedHeaders, mergedBody);
 }
 
 async function buildAggregateResponse(request, userKey, type, targets, failures = [], warning = "") {
@@ -2420,6 +2476,361 @@ async function buildCachedViewResponse(request, userKey, type, runtime, upstream
       : "Current user has no cached registration yet.",
     payload: shapeRegistrationResponse(user, upstream, userState, type, relayUrls),
   };
+}
+
+function clearAggregatePreRegistrationTimer() {
+  if (!aggregatePreRegistrationTimer) {
+    return;
+  }
+
+  clearTimeout(aggregatePreRegistrationTimer);
+  aggregatePreRegistrationTimer = null;
+}
+
+function buildAggregateCacheFailureMessage(userSummaries = []) {
+  const messages = (Array.isArray(userSummaries) ? userSummaries : [])
+    .map((item) => item?.error || "")
+    .filter(Boolean);
+
+  if (messages.length === 0) {
+    return "Aggregate pre-registration did not produce a usable cache.";
+  }
+
+  return messages[0];
+}
+
+async function buildAggregateCacheEntriesForUser(
+  userKey,
+  runtime,
+  configuredTargetsByType = {},
+  options = {},
+) {
+  let registrationResult = null;
+
+  try {
+    registrationResult = await manualRegisterAggregateWithRuntime(userKey, {
+      timeoutSeconds: options.timeoutSeconds,
+    });
+  } catch (error) {
+    return {
+      userKey,
+      cacheEntries: {},
+      cacheCount: 0,
+      sourceCount: 0,
+      failureCount: 1,
+      error: error.message,
+    };
+  }
+
+  const registeredTargetMap = new Map(
+    registrationResult.targets.map((target) => [target.storageKey || target.upstreamId, target]),
+  );
+  const cacheEntries = {};
+  const generatedAt = new Date().toISOString();
+  let cacheCount = 0;
+  let sourceCount = 0;
+  let failureCount = registrationResult.failures.length;
+
+  for (const type of RELAY_TYPES) {
+    const configuredTargets = Array.isArray(configuredTargetsByType[type])
+      ? configuredTargetsByType[type]
+      : [];
+    const signature = buildAggregateTargetSignature(configuredTargets);
+    if (!signature) {
+      continue;
+    }
+
+    const fetchTargets = configuredTargets
+      .map((target) => registeredTargetMap.get(target.storageKey || target.upstreamId))
+      .filter((target) => Boolean(target?.userState?.latestRegistration?.clientUrls?.[type]));
+    if (fetchTargets.length === 0) {
+      continue;
+    }
+
+    const fetchResult = await collectAggregateExecutionResults(
+      fetchTargets,
+      async (target) => ({
+        ...target,
+        payload: await fetchResolvedSubscriptionSource(target, type, "GET", {
+          timeoutSeconds: options.timeoutSeconds,
+          timeoutMs: options.timeoutMs,
+        }),
+      }),
+      {
+        timeoutSeconds: options.timeoutSeconds,
+        timeoutMs: options.timeoutMs,
+      },
+    );
+
+    const successfulFetches = fetchResult.targets.map((entry) => ({
+      target: entry,
+      payload: entry.payload,
+    }));
+    const combinedFailures = [...registrationResult.failures, ...fetchResult.failures];
+    failureCount += fetchResult.failures.length;
+
+    if (successfulFetches.length === 0) {
+      continue;
+    }
+
+    const mergedHeaders = buildAggregateMergedHeaders(
+      type,
+      successfulFetches,
+      `RelayHub Cached Aggregate ${type}`,
+    );
+    const mergedBody = await buildAggregateMergedBody(type, successfulFetches, {
+      stripRules: true,
+    });
+
+    cacheEntries[type] = {
+      type,
+      signature,
+      headers: mergedHeaders,
+      bodyBase64: mergedBody.toString("base64"),
+      generatedAt,
+      sourceCount: successfulFetches.length,
+      failureCount: combinedFailures.length,
+      warning: buildAggregateWarning(combinedFailures),
+      sourceLabels: successfulFetches.map(
+        (entry) => entry.target.instanceLabel || entry.target.upstreamId,
+      ),
+    };
+    cacheCount += 1;
+    sourceCount += successfulFetches.length;
+  }
+
+  return {
+    userKey,
+    cacheEntries,
+    cacheCount,
+    sourceCount,
+    failureCount,
+    error:
+      cacheCount > 0
+        ? ""
+        : buildAggregateWarning(registrationResult.failures) || "No aggregate source produced a cache.",
+  };
+}
+
+async function scheduleAggregatePreRegistration(options = {}) {
+  clearAggregatePreRegistrationTimer();
+
+  const runtime = await getActiveUpstreamRuntime();
+  const preRegistration = getAggregatePreRegistrationSettings(runtime.upstreamAggregation);
+  const configuredTargets =
+    runtime.activeUpstreamMode === ACTIVE_UPSTREAM_MODES.AGGREGATE
+      ? await getRuntimeAggregateTargets("")
+      : [];
+  const enabled =
+    runtime.activeUpstreamMode === ACTIVE_UPSTREAM_MODES.AGGREGATE
+    && preRegistration.enabled
+    && configuredTargets.length > 0;
+
+  if (!enabled) {
+    aggregatePreRegistrationImmediateRequested = false;
+    await updateAggregateCacheScheduler({
+      enabled,
+      intervalMinutes: preRegistration.intervalMinutes,
+      nextRunAt: "",
+      running: Boolean(aggregatePreRegistrationJob),
+    });
+    return;
+  }
+
+  const schedulerStatus = await getAggregateCacheScheduler();
+  const immediate = Boolean(options.immediate || aggregatePreRegistrationImmediateRequested);
+  const lastCompletedAtMs = Date.parse(schedulerStatus.lastCompletedAt || "");
+  const now = Date.now();
+  const nextRunAtMs =
+    immediate || !Number.isFinite(lastCompletedAtMs)
+      ? now
+      : Math.max(now, lastCompletedAtMs + preRegistration.intervalMinutes * 60 * 1000);
+  const nextRunAt = new Date(nextRunAtMs).toISOString();
+
+  await updateAggregateCacheScheduler({
+    enabled: true,
+    intervalMinutes: preRegistration.intervalMinutes,
+    nextRunAt,
+    running: Boolean(aggregatePreRegistrationJob),
+  });
+
+  if (aggregatePreRegistrationJob) {
+    return;
+  }
+
+  aggregatePreRegistrationTimer = setTimeout(() => {
+    runAggregatePreRegistrationCycle("scheduled").catch((error) => {
+      console.error("Aggregate pre-registration run failed:", error);
+    });
+  }, Math.max(0, nextRunAtMs - now));
+}
+
+async function runAggregatePreRegistrationCycle(trigger = "scheduled") {
+  if (aggregatePreRegistrationJob) {
+    return aggregatePreRegistrationJob;
+  }
+
+  clearAggregatePreRegistrationTimer();
+  const startedAtMs = Date.now();
+
+  aggregatePreRegistrationJob = (async () => {
+    const runtime = await getActiveUpstreamRuntime();
+    const preRegistration = getAggregatePreRegistrationSettings(runtime.upstreamAggregation);
+    const configuredTargets =
+      runtime.activeUpstreamMode === ACTIVE_UPSTREAM_MODES.AGGREGATE
+        ? await getRuntimeAggregateTargets("")
+        : [];
+    const enabled =
+      runtime.activeUpstreamMode === ACTIVE_UPSTREAM_MODES.AGGREGATE
+      && preRegistration.enabled
+      && configuredTargets.length > 0;
+
+    if (!enabled) {
+      aggregatePreRegistrationImmediateRequested = false;
+      await updateAggregateCacheScheduler({
+        enabled,
+        intervalMinutes: preRegistration.intervalMinutes,
+        running: false,
+        nextRunAt: "",
+      });
+      return {
+        skipped: true,
+        trigger,
+      };
+    }
+
+    aggregatePreRegistrationImmediateRequested = false;
+
+    const configuredTargetsByType = Object.fromEntries(
+      await Promise.all(
+        RELAY_TYPES.map(async (type) => [type, await getRuntimeAggregateTargets(type)]),
+      ),
+    );
+
+    await updateAggregateCacheScheduler({
+      enabled: true,
+      intervalMinutes: preRegistration.intervalMinutes,
+      running: true,
+      nextRunAt: "",
+      lastStartedAt: new Date(startedAtMs).toISOString(),
+      lastError: "",
+    });
+
+    const relayUsers = await listRelayUsers();
+    const userSummaries = [];
+    const aggregateTimeoutSeconds = getAggregateTimeoutSeconds(runtime.upstreamAggregation);
+    const aggregateTimeoutMs = getAggregateTimeoutMs(runtime.upstreamAggregation);
+
+    for (const relayUser of relayUsers) {
+      const summary = await buildAggregateCacheEntriesForUser(
+        relayUser.key,
+        runtime,
+        configuredTargetsByType,
+        {
+          timeoutSeconds: aggregateTimeoutSeconds,
+          timeoutMs: aggregateTimeoutMs,
+        },
+      );
+      userSummaries.push(summary);
+
+      if (summary.cacheCount > 0) {
+        await mergeAggregateCacheEntries(relayUser.key, summary.cacheEntries);
+      }
+    }
+
+    const completedAt = new Date().toISOString();
+    const cacheCount = userSummaries.reduce((total, item) => total + (item.cacheCount || 0), 0);
+    const sourceCount = userSummaries.reduce((total, item) => total + (item.sourceCount || 0), 0);
+    const failureCount = userSummaries.reduce((total, item) => total + (item.failureCount || 0), 0);
+    const schedulerPatch = {
+      enabled: true,
+      intervalMinutes: preRegistration.intervalMinutes,
+      running: false,
+      lastCompletedAt: completedAt,
+      lastDurationMs: Date.now() - startedAtMs,
+      lastRun: {
+        userCount: relayUsers.length,
+        cacheCount,
+        sourceCount,
+        failureCount,
+      },
+      lastError: cacheCount > 0 ? "" : buildAggregateCacheFailureMessage(userSummaries),
+    };
+
+    if (cacheCount > 0) {
+      schedulerPatch.lastSuccessfulAt = completedAt;
+    }
+
+    await updateAggregateCacheScheduler(schedulerPatch);
+
+    return {
+      trigger,
+      userSummaries,
+      cacheCount,
+      sourceCount,
+      failureCount,
+    };
+  })()
+    .catch(async (error) => {
+      await updateAggregateCacheScheduler({
+        running: false,
+        lastCompletedAt: new Date().toISOString(),
+        lastDurationMs: Date.now() - startedAtMs,
+        lastError: error.message,
+      });
+      throw error;
+    })
+    .finally(async () => {
+      aggregatePreRegistrationJob = null;
+      await scheduleAggregatePreRegistration();
+    });
+
+  return aggregatePreRegistrationJob;
+}
+
+async function tryServeAggregatePreRegistrationCache(response, request, type, relayUser, runtime) {
+  const preRegistration = getAggregatePreRegistrationSettings(runtime?.upstreamAggregation);
+  if (
+    runtime?.activeUpstreamMode !== ACTIVE_UPSTREAM_MODES.AGGREGATE
+    || !preRegistration.enabled
+  ) {
+    return false;
+  }
+
+  const configuredTargets = await getRuntimeAggregateTargets(type);
+  const signature = buildAggregateTargetSignature(configuredTargets);
+  if (!signature) {
+    return false;
+  }
+
+  const cacheEntry = await getAggregateCacheEntry(relayUser.key, type);
+  if (!cacheEntry || cacheEntry.signature !== signature || !cacheEntry.bodyBase64) {
+    aggregatePreRegistrationImmediateRequested = true;
+    scheduleAggregatePreRegistration().catch(() => undefined);
+    return false;
+  }
+
+  const bodyBuffer = Buffer.from(cacheEntry.bodyBase64, "base64");
+  if (bodyBuffer.length === 0) {
+    aggregatePreRegistrationImmediateRequested = true;
+    scheduleAggregatePreRegistration().catch(() => undefined);
+    return false;
+  }
+
+  sendSubscriptionPayload(
+    response,
+    request.method,
+    {
+      ...cacheEntry.headers,
+      "content-type": getContentTypeByRelayType(
+        type,
+        cacheEntry.headers?.["content-type"] || "text/plain; charset=utf-8",
+      ),
+    },
+    bodyBuffer,
+  );
+
+  return true;
 }
 
 async function handleLogin(request, response) {
@@ -2487,6 +2898,7 @@ async function handleSession(request, response) {
     appUpdate,
     upstreamCloudStatus,
     upstreamCloud,
+    aggregatePreRegistrationStatus,
   ] = await Promise.all([
     getActiveUpstreamRuntime(),
     getDisplayOrigin(),
@@ -2494,6 +2906,7 @@ async function handleSession(request, response) {
     buildAppUpdateStatus(false),
     buildUpstreamCloudStatus(false),
     getUpstreamCloudConfig(),
+    getAggregateCacheScheduler(),
   ]);
   const upstreams = await listUpstreamConfigs();
   const userStates = await listUserStates(activeUpstreamId);
@@ -2516,6 +2929,7 @@ async function handleSession(request, response) {
     activeUpstreamMode,
     upstreamOrder,
     upstreamAggregation,
+    aggregatePreRegistrationStatus,
     upstreams,
     runtimeModes: {
       alwaysRefresh: RUNTIME_MODES.ALWAYS_REFRESH,
@@ -2576,10 +2990,33 @@ async function handleUpdateSettings(request, response) {
     providerSettings: body.providerSettings,
     enabled: body.enabled,
   });
+  const shouldRefreshAggregateCache =
+    body.upstreamAggregation !== undefined
+    || body.activeUpstreamMode !== undefined
+    || body.upstreamOrder !== undefined
+    || body.upstreamId !== undefined
+    || body.name !== undefined
+    || body.remark !== undefined
+    || body.enabled !== undefined
+    || body.inviteCode !== undefined
+    || body.runtimeMode !== undefined
+    || body.trafficThresholdPercent !== undefined
+    || body.maxRegistrationAgeMinutes !== undefined
+    || body.subscriptionUpdateIntervalMinutes !== undefined
+    || body.providerSettings !== undefined;
 
   if (body.upstreamCloud !== undefined) {
     invalidateCaches();
   }
+
+  if (shouldRefreshAggregateCache) {
+    aggregatePreRegistrationImmediateRequested = true;
+  }
+
+  await scheduleAggregatePreRegistration({
+    immediate: shouldRefreshAggregateCache,
+  });
+  const aggregatePreRegistrationStatus = await getAggregateCacheScheduler();
 
   sendJson(response, 200, {
     success: true,
@@ -2589,6 +3026,7 @@ async function handleUpdateSettings(request, response) {
     displayOrigin: result.displayOrigin,
     upstreamOrder: result.upstreamOrder,
     upstreamAggregation: result.upstreamAggregation,
+    aggregatePreRegistrationStatus,
     upstreamCloud: result.upstreamCloud,
     updatedAt: result.updatedAt,
     upstreamConfig: result.upstreamConfig,
@@ -2936,6 +3374,10 @@ async function proxySubscription(response, request, type, url) {
 
   const runtime = await getActiveUpstreamRuntime();
   if (runtime.activeUpstreamMode === ACTIVE_UPSTREAM_MODES.AGGREGATE) {
+    if (await tryServeAggregatePreRegistrationCache(response, request, type, relayUser, runtime)) {
+      return;
+    }
+
     await proxyAggregateSubscription(response, request, type, relayUser, runtime);
     return;
     const aggregateResult = await resolveAggregateRelayStates(relayUser.key, type);
@@ -3342,4 +3784,7 @@ const server = http.createServer(requestListener);
 
 server.listen(PORT, HOST, () => {
   console.log(`Server listening on http://${HOST}:${PORT}`);
+  scheduleAggregatePreRegistration().catch((error) => {
+    console.error("Failed to initialize aggregate pre-registration scheduler:", error);
+  });
 });
