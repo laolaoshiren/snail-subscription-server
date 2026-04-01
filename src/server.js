@@ -3401,11 +3401,34 @@ async function buildAggregateCacheEntriesForUser(
   );
   const retainedSourcePool = retainedEntries.map((entry) => entry.sourcePoolEntry);
   const retainedTargets = retainedEntries.map((entry) => entry.target);
+  const existingCacheEntries =
+    currentUserState?.cacheEntries && typeof currentUserState.cacheEntries === "object"
+      ? currentUserState.cacheEntries
+      : {};
   const cacheBuild = await buildAggregateCacheEntriesFromSourceTargets(
     retainedTargets,
     configuredTargetsByType,
     options,
   );
+  const nextCacheEntries = {
+    ...(cacheBuild.cacheEntries || {}),
+  };
+  RELAY_TYPES.forEach((type) => {
+    if (nextCacheEntries[type]?.bodyBase64) {
+      return;
+    }
+
+    const existingEntry = existingCacheEntries[type];
+    const expectedSignature = buildAggregateTargetSignature(configuredTargetsByType[type]);
+    if (
+      existingEntry?.bodyBase64
+      && expectedSignature
+      && existingEntry.signature === expectedSignature
+    ) {
+      nextCacheEntries[type] = existingEntry;
+    }
+  });
+  const nextCacheCount = Object.keys(nextCacheEntries).length;
   const combinedFailures = [
     ...registrationFailures,
     ...existingValidation.failures,
@@ -3414,7 +3437,7 @@ async function buildAggregateCacheEntriesForUser(
   ];
   const failureCount = combinedFailures.length;
   const error =
-    cacheBuild.cacheCount > 0
+    nextCacheCount > 0
       ? ""
       : buildAggregateWarning(combinedFailures)
         || registrationOutcome?.error?.message
@@ -3422,9 +3445,9 @@ async function buildAggregateCacheEntriesForUser(
 
   return {
     userKey,
-    cacheEntries: cacheBuild.cacheEntries,
+    cacheEntries: nextCacheEntries,
     sourcePool: retainedSourcePool,
-    cacheCount: cacheBuild.cacheCount,
+    cacheCount: nextCacheCount,
     sourceCount: retainedSourcePool.length,
     failureCount,
     error,
