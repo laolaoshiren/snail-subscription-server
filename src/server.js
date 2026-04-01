@@ -2471,12 +2471,20 @@ async function persistVerifiedUpstreamTestResult(userKey, upstreamId, verificati
   const normalizedUserKey = normalizeUserKey(userKey);
   const normalizedRuntime = runtime || await getActiveUpstreamRuntime();
   const persistedAt = new Date().toISOString();
-  const mergedRegistration = mergeRegistrationWithUsage(verification.record, verification.usage);
-  const relayPersisted = Boolean(mergedRegistration);
+  const persistedRegistration = verification.record
+    ? {
+      ...verification.record,
+      accountCreatedAt:
+        verification.record.accountCreatedAt || verification.usage?.accountCreatedAt || "",
+      expiredAt: verification.record.expiredAt || verification.usage?.expiredAt || "",
+      lastUsageCheckAt: verification.usage?.queriedAt || verification.record.lastUsageCheckAt || "",
+    }
+    : null;
+  const relayPersisted = Boolean(persistedRegistration);
 
   if (relayPersisted) {
     await updateUserState(normalizedUserKey, upstreamId, async (userState) => {
-      userState.latestRegistration = mergedRegistration;
+      userState.latestRegistration = persistedRegistration;
       userState.latestUsage = verification.usage || userState.latestUsage || null;
     });
 
@@ -2491,7 +2499,7 @@ async function persistVerifiedUpstreamTestResult(userKey, upstreamId, verificati
       decision: verification.source === "fresh_registration" ? "register" : "reuse",
       relayType: verification.subscriptionTest?.type || "",
       requestSource: "manual",
-      registration: mergedRegistration,
+      registration: persistedRegistration,
       usage: verification.usage || null,
       details: {
         source: verification.source || "",
@@ -2513,17 +2521,17 @@ async function persistVerifiedUpstreamTestResult(userKey, upstreamId, verificati
       instanceNumber: 1,
       instanceLabel: upstreamId,
     };
-  const sourcePoolEntry = mergedRegistration && verification.subscriptionTest?.verified
+  const sourcePoolEntry = persistedRegistration && verification.subscriptionTest?.verified
     ? createAggregateSourcePoolEntry(
         {
           ...matchingTarget,
           id: buildAggregateSourcePoolUniqueKey({
             ...matchingTarget,
-            registration: mergedRegistration,
+            registration: persistedRegistration,
           }),
           lastValidatedAt: persistedAt,
           lastValidationError: "",
-          registration: mergedRegistration,
+          registration: persistedRegistration,
           latestUsage: verification.usage || null,
         },
         persistedAt,

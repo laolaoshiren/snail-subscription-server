@@ -218,17 +218,17 @@ function mergeRegistrationWithUsage(record, usage) {
 
   return {
     ...record,
-    email: usage?.email || record.email,
+    email: record.email || usage?.email || "",
     // Preserve the registration-time subscription URLs whenever they already exist.
     // Some upstream status endpoints return a reduced subscribe_url that is valid but
     // does not match the full node set that the registration step verified.
     subscribeUrl: recordSubscribeUrl || usageSubscribeUrl || record.subscribeUrl,
     clientUrls: recordClientUrls || usageClientUrls || record.clientUrls,
-    upstreamSite: usage?.upstreamSite || record.upstreamSite,
-    apiBase: usage?.apiBase || record.apiBase,
-    entryUrl: usage?.entryUrl || record.entryUrl,
-    detectorConfigUrl: usage?.detectorConfigUrl || record.detectorConfigUrl,
-    upstreamSource: usage?.upstreamSource || record.upstreamSource,
+    upstreamSite: record.upstreamSite || usage?.upstreamSite || "",
+    apiBase: record.apiBase || usage?.apiBase || "",
+    entryUrl: record.entryUrl || usage?.entryUrl || "",
+    detectorConfigUrl: record.detectorConfigUrl || usage?.detectorConfigUrl || "",
+    upstreamSource: record.upstreamSource || usage?.upstreamSource || "",
     accountCreatedAt: usage?.accountCreatedAt || record.accountCreatedAt || "",
     expiredAt: usage?.expiredAt || record.expiredAt || "",
     lastUsageCheckAt: usage?.queriedAt || record.lastUsageCheckAt || "",
