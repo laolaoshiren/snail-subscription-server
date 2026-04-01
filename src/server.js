@@ -2109,6 +2109,39 @@ async function buildAggregateMergedBody(type, successfulFetches = [], options = 
   return mergedBody;
 }
 
+function upgradeLegacyCachedAggregateBody(type, bodyBuffer) {
+  if (type !== "clash" || !Buffer.isBuffer(bodyBuffer) || bodyBuffer.length === 0) {
+    return bodyBuffer;
+  }
+
+  try {
+    const parsed = yaml.load(bodyBuffer.toString("utf8"));
+    const hasLegacyBareProxyShape =
+      parsed
+      && typeof parsed === "object"
+      && Array.isArray(parsed.proxies)
+      && parsed.proxies.length > 0
+      && !Array.isArray(parsed["proxy-groups"])
+      && !Array.isArray(parsed.rules);
+
+    if (!hasLegacyBareProxyShape) {
+      return bodyBuffer;
+    }
+
+    return sanitizeSubscriptionBody(
+      mergeSubscriptionBodies(
+        type,
+        [bodyBuffer],
+        {
+          minimalGroups: true,
+        },
+      ),
+    );
+  } catch {
+    return bodyBuffer;
+  }
+}
+
 function sendSubscriptionPayload(response, requestMethod, headers, bodyBuffer) {
   response.writeHead(200, headers);
   if (requestMethod === "HEAD") {
@@ -3616,7 +3649,10 @@ async function tryServeAggregatePreRegistrationCache(response, request, type, re
     return true;
   }
 
-  const bodyBuffer = Buffer.from(cacheEntry.bodyBase64, "base64");
+  const bodyBuffer = upgradeLegacyCachedAggregateBody(
+    type,
+    Buffer.from(cacheEntry.bodyBase64, "base64"),
+  );
   if (bodyBuffer.length === 0) {
     sendEmptyAggregateSubscription(response, request, type, runtime);
     return true;
