@@ -84,6 +84,10 @@ const PUBLIC_ORIGIN = normalizeConfiguredOrigin(process.env.PUBLIC_ORIGIN || "")
 const SESSION_COOKIE_NAME = "snail_session";
 const SESSION_TTL_MS = 1000 * 60 * 60 * 12;
 const RELAY_FETCH_TIMEOUT_MS = Number.parseInt(process.env.RELAY_FETCH_TIMEOUT_MS || "30000", 10);
+const MIN_SNAIL_SERVER_NODE_COUNT = Math.max(
+  1,
+  Number.parseInt(process.env.MIN_SNAIL_SERVER_NODE_COUNT || "2", 10) || 2,
+);
 const publicDir = path.join(__dirname, "..", "public");
 const sessions = new Map();
 let aggregatePreRegistrationTimer = null;
@@ -1590,6 +1594,69 @@ function countSubscriptionNodes(type, bodyBuffer) {
     .length;
 }
 
+function isSnailDefaultUpstream(source = {}) {
+  return (source?.upstreamId || "").toString().trim() === "snail-default";
+}
+
+function shouldRedirectRelayToUpstream(source = {}, type = "") {
+  if (!isSnailDefaultUpstream(source)) {
+    return false;
+  }
+
+  const latestRegistration = source?.userState?.latestRegistration;
+  if (!latestRegistration || latestRegistration.mock) {
+    return false;
+  }
+
+  return Boolean((latestRegistration?.clientUrls?.[type] || "").toString().trim());
+}
+
+function getRelayUpstreamRedirectLocation(source = {}, type = "") {
+  if (!shouldRedirectRelayToUpstream(source, type)) {
+    return "";
+  }
+
+  return (source?.userState?.latestRegistration?.clientUrls?.[type] || "").toString().trim();
+}
+
+function isDegradedSnailServerNodeCount(upstreamId = "", nodeCount = 0) {
+  const parsedNodeCount = Number.parseInt(nodeCount, 10);
+  return (upstreamId || "").toString().trim() === "snail-default"
+    && Number.isFinite(parsedNodeCount)
+    && parsedNodeCount > 0
+    && parsedNodeCount < MIN_SNAIL_SERVER_NODE_COUNT;
+}
+
+function isDegradedServerSidePayload(source = {}, payload = {}, requestMethod = "GET") {
+  if ((requestMethod || "GET").toUpperCase() === "HEAD") {
+    return false;
+  }
+
+  return isDegradedSnailServerNodeCount(source?.upstreamId, payload?.meta?.nodeCount);
+}
+
+function createDegradedServerSidePayloadError(source = {}, payload = {}) {
+  const nodeCount = Number.parseInt(payload?.meta?.nodeCount, 10) || 0;
+  const requestProfileKey = (payload?.meta?.requestProfileKey || "").toString().trim();
+  const transportKey = (payload?.meta?.transportKey || "").toString().trim();
+  const messageParts = [
+    `Server-side fetch returned only ${nodeCount} node(s)`,
+    `for ${(source?.upstreamId || "upstream").toString().trim() || "upstream"}`,
+  ];
+
+  if (requestProfileKey) {
+    messageParts.push(`using ${requestProfileKey}`);
+  }
+  if (transportKey) {
+    messageParts.push(`via ${transportKey}`);
+  }
+
+  const error = new Error(`${messageParts.join(" ")}; treating it as degraded payload.`);
+  error.code = "DEGRADED_SERVER_SIDE_PAYLOAD";
+  error.status = 502;
+  return error;
+}
+
 async function fetchPreferredSubscriptionPayload(type, upstreamUrl, requestTimeoutMs, requestMethod = "GET") {
   const requestProfiles = buildSubscriptionRequestProfiles(type);
   const attemptConfigs = requestProfiles.flatMap((profile, profileIndex) => ([
@@ -2857,7 +2924,9 @@ async function persistVerifiedUpstreamTestResult(userKey, upstreamId, verificati
       instanceNumber: 1,
       instanceLabel: upstreamId,
     };
-  const sourcePoolEntry = persistedRegistration && verification.subscriptionTest?.verified
+  const sourcePoolEntry = persistedRegistration
+    && verification.subscriptionTest?.verified
+    && !isDegradedSnailServerNodeCount(upstreamId, verification.subscriptionTest?.nodeCount)
     ? createAggregateSourcePoolEntry(
         {
           ...matchingTarget,
@@ -3001,6 +3070,12 @@ async function fetchResolvedSubscriptionSource(source, type, requestMethod = "GE
   return {
     headers,
     body,
+    meta: {
+      upstreamUrl,
+      nodeCount: preferredPayload.nodeCount || 0,
+      requestProfileKey: preferredPayload.requestProfileKey || "",
+      transportKey: preferredPayload.transportKey || "",
+    },
   };
 }
 
@@ -3030,22 +3105,6 @@ async function proxyAggregateSubscription(response, request, type, relayUser, ru
           },
         );
 
-        await appendUserHistory(relayUser.key, target.storageKey || target.upstreamId, {
-          action: "relay_success",
-          title: "聚合订阅已成功返回",
-          message: `客户端成功拉取 ${type} 聚合订阅。`,
-          mode: ACTIVE_UPSTREAM_MODES.AGGREGATE,
-          relayType: type,
-          requestSource: "relay",
-          registration: resolvedState?.userState?.latestRegistration || null,
-          usage: resolvedState?.userState?.latestUsage || null,
-          details: {
-            aggregate: true,
-            instanceLabel: target.instanceLabel || target.upstreamId,
-            storageKey: target.storageKey || target.upstreamId,
-          },
-        });
-
         return {
           ...resolvedState,
           payload,
@@ -3074,11 +3133,44 @@ async function proxyAggregateSubscription(response, request, type, relayUser, ru
     return;
   }
 
-  const successfulFetches = aggregateResult.targets.map((entry) => ({
-    target: entry,
-    payload: entry.payload,
-  }));
   const failedFetches = [...aggregateResult.failures];
+  const successfulFetches = [];
+
+  aggregateResult.targets.forEach((entry) => {
+    if (isDegradedServerSidePayload(entry, entry.payload, request.method)) {
+      failedFetches.push({
+        ...entry,
+        error: createDegradedServerSidePayloadError(entry, entry.payload),
+      });
+      return;
+    }
+
+    successfulFetches.push({
+      target: entry,
+      payload: entry.payload,
+    });
+  });
+
+  await Promise.all(
+    successfulFetches.map(({ target, payload }) =>
+      appendUserHistory(relayUser.key, target.storageKey || target.upstreamId, {
+        action: "relay_success",
+        title: "Aggregate relay returned.",
+        message: `Client fetched ${type} aggregate subscription successfully.`,
+        mode: ACTIVE_UPSTREAM_MODES.AGGREGATE,
+        relayType: type,
+        requestSource: "relay",
+        registration: target?.userState?.latestRegistration || null,
+        usage: target?.userState?.latestUsage || null,
+        details: {
+          aggregate: true,
+          instanceLabel: target.instanceLabel || target.upstreamId,
+          storageKey: target.storageKey || target.upstreamId,
+          nodeCount: Number.parseInt(payload?.meta?.nodeCount, 10) || 0,
+        },
+      }).catch(() => undefined)
+    ),
+  );
 
   failedFetches.forEach((failure) => {
     appendUserHistory(relayUser.key, failure.storageKey || failure.upstreamId, {
@@ -3146,13 +3238,39 @@ async function proxyScopedUpstreamSubscription(response, request, type, relayUse
     return;
   }
 
+  const scopedSource = {
+    upstreamId: normalizedUpstreamId,
+    storageKey: normalizedUpstreamId,
+    upstreamConfig,
+    userState,
+  };
+  const redirectLocation = getRelayUpstreamRedirectLocation(scopedSource, type);
+  if (redirectLocation) {
+    await appendUserHistory(relayUser.key, normalizedUpstreamId, {
+      action: "relay_success",
+      title: "Scoped relay redirected to upstream.",
+      message: `Client fetched ${type} subscription via upstream redirect.`,
+      relayType: type,
+      requestSource: "relay",
+      registration: userState.latestRegistration,
+      usage: userState.latestUsage || null,
+      details: {
+        scopedRelay: true,
+        upstreamId: normalizedUpstreamId,
+        redirected: true,
+      },
+    });
+    response.writeHead(302, {
+      Location: redirectLocation,
+      "Cache-Control": "no-store, max-age=0, must-revalidate",
+      Pragma: "no-cache",
+    });
+    response.end();
+    return;
+  }
+
   const payload = await fetchResolvedSubscriptionSource(
-    {
-      upstreamId: normalizedUpstreamId,
-      storageKey: normalizedUpstreamId,
-      upstreamConfig,
-      userState,
-    },
+    scopedSource,
     type,
     request.method,
     {
@@ -3623,11 +3741,14 @@ async function validateAggregateSourcePoolEntries(entries = [], configuredTarget
         throw new Error("No subscription URL is available for testing.");
       }
 
-      await fetchResolvedSubscriptionSource(resolvedTarget, probeType, "GET", {
+      const payload = await fetchResolvedSubscriptionSource(resolvedTarget, probeType, "GET", {
         timeoutSeconds,
         timeoutMs,
         deadlineAt,
       });
+      if (isDegradedServerSidePayload(resolvedTarget, payload, "GET")) {
+        throw createDegradedServerSidePayloadError(resolvedTarget, payload);
+      }
 
       return {
         validatedEntry: {
@@ -3719,16 +3840,28 @@ async function buildAggregateCacheEntriesFromSourceTargets(
           deadlineAt,
         },
       );
-      const successfulFetches = fetchResult.targets.map((entry) => ({
-        target: entry,
-        payload: entry.payload,
-      }));
+      const degradedFailures = [];
+      const successfulFetches = [];
+      fetchResult.targets.forEach((entry) => {
+        if (isDegradedServerSidePayload(entry, entry.payload, "GET")) {
+          degradedFailures.push({
+            ...entry,
+            error: createDegradedServerSidePayloadError(entry, entry.payload),
+          });
+          return;
+        }
+
+        successfulFetches.push({
+          target: entry,
+          payload: entry.payload,
+        });
+      });
       if (successfulFetches.length === 0) {
         return {
           type,
           signature,
           cacheEntry: null,
-          failures: fetchResult.failures,
+          failures: [...fetchResult.failures, ...degradedFailures],
         };
       }
 
@@ -3751,13 +3884,13 @@ async function buildAggregateCacheEntriesFromSourceTargets(
           bodyBase64: mergedBody.toString("base64"),
           generatedAt,
           sourceCount: successfulFetches.length,
-          failureCount: fetchResult.failures.length,
-          warning: buildAggregateWarning(fetchResult.failures),
+          failureCount: fetchResult.failures.length + degradedFailures.length,
+          warning: buildAggregateWarning([...fetchResult.failures, ...degradedFailures]),
           sourceLabels: successfulFetches.map(
             (entry) => entry.target.instanceLabel || entry.target.upstreamId,
           ),
         },
-        failures: fetchResult.failures,
+        failures: [...fetchResult.failures, ...degradedFailures],
       };
     }),
   );
@@ -4778,14 +4911,48 @@ async function proxySubscription(response, request, type, url) {
         return;
       }
 
+      const relaySource = {
+        upstreamId,
+        storageKey: upstreamId,
+        upstreamConfig,
+        userState,
+      };
+      const redirectLocation =
+        candidateUpstreamIds.length === 1
+          ? getRelayUpstreamRedirectLocation(relaySource, type)
+          : "";
+      if (redirectLocation) {
+        await appendUserHistory(relayUser.key, upstreamId, {
+          action: "relay_success",
+          title: "Relay redirected to upstream.",
+          message: `Client fetched ${type} subscription via upstream redirect.`,
+          mode: runtimeMode,
+          relayType: type,
+          requestSource: "relay",
+          registration: latest,
+          usage: userState.latestUsage,
+          details: {
+            redirected: true,
+            upstreamId,
+          },
+        });
+        response.writeHead(302, {
+          Location: redirectLocation,
+          "Cache-Control": "no-store, max-age=0, must-revalidate",
+          Pragma: "no-cache",
+        });
+        response.end();
+        return;
+      }
+
       const payload = await fetchResolvedSubscriptionSource(
-        {
-          upstreamConfig,
-          userState,
-        },
+        relaySource,
         type,
         request.method,
       );
+      if (isDegradedServerSidePayload(relaySource, payload, request.method)) {
+        throw createDegradedServerSidePayloadError(relaySource, payload);
+      }
 
       await appendUserHistory(relayUser.key, upstreamId, {
         action: "relay_success",
