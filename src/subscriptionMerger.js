@@ -102,7 +102,7 @@ function normalizeSourceEntry(entry) {
 
   return {
     bodyBuffer,
-    sourceLabel: (entry.sourceLabel || entry.instanceLabel || "").toString().trim(),
+    sourceLabel: normalizeSourceLabel(entry.sourceLabel || entry.instanceLabel || ""),
   };
 }
 
@@ -117,6 +117,16 @@ function appendSourceLabel(name, sourceLabel) {
   }
 
   return `${baseName} · ${sourceLabel}`;
+}
+
+function isMeaninglessSourceLabel(value) {
+  const normalized = (value || "").toString().trim();
+  return !normalized || /^[?？\uFFFD]+$/u.test(normalized);
+}
+
+function normalizeSourceLabel(value) {
+  const normalized = (value || "").toString().trim();
+  return isMeaninglessSourceLabel(normalized) ? "" : normalized;
 }
 
 const AGGREGATE_HEALTHCHECK_URL = "http://www.gstatic.com/generate_204";
@@ -695,10 +705,15 @@ function buildMinimalClashConfig(proxies) {
 }
 
 function mergeClashBodies(entries, options = {}) {
+  const normalizedEntries = normalizeSourceEntries(entries);
+  const distinctSourceLabels = new Set(
+    normalizedEntries.map((entry) => entry.sourceLabel).filter(Boolean),
+  );
+  const shouldAppendSourceLabel = distinctSourceLabels.size > 1;
   const usedNames = new Set();
   const proxies = [];
 
-  normalizeSourceEntries(entries).forEach((entry) => {
+  normalizedEntries.forEach((entry) => {
     const parsed = yaml.load(entry.bodyBuffer.toString("utf8"));
     const sourceProxies = Array.isArray(parsed?.proxies)
       ? parsed.proxies
@@ -714,7 +729,9 @@ function mergeClashBodies(entries, options = {}) {
       const nextProxy = cloneSerializable(proxy);
       setAggregateCountryGroup(nextProxy, detectAggregateCountryGroup(nextProxy.name));
       nextProxy.name = buildUniqueName(
-        appendSourceLabel(nextProxy.name, entry.sourceLabel),
+        shouldAppendSourceLabel
+          ? appendSourceLabel(nextProxy.name, entry.sourceLabel)
+          : (nextProxy.name || "node").toString().trim() || "node",
         usedNames,
       );
       proxies.push(nextProxy);

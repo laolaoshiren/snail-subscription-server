@@ -98,7 +98,7 @@ function normalizeSourceLabels(labels = []) {
 
   return labels
     .map((value) => (value || "").toString().trim())
-    .filter(Boolean);
+    .filter((value) => value && !/^[?？\uFFFD]+$/u.test(value));
 }
 
 function normalizeClientUrls(clientUrls = {}) {

@@ -390,6 +390,34 @@ function normalizeNodeNameForMatching(value) {
   return value.normalize("NFKC").replace(/[\u3002\uFF61\uFE52\uFF0E]/g, ".");
 }
 
+function isMeaninglessAggregateSourceLabel(value) {
+  const text = (value || "").toString().trim();
+  return !text || /^[?？\uFFFD]+$/u.test(text);
+}
+
+function stripMeaninglessAggregateSourceLabel(name) {
+  const text = (name || "").toString().trim();
+  if (!text) {
+    return text;
+  }
+
+  const separators = [" · ", " • ", " ・ "];
+  for (const separator of separators) {
+    const index = text.lastIndexOf(separator);
+    if (index < 0) {
+      continue;
+    }
+
+    const baseName = text.slice(0, index).trim();
+    const sourceLabel = text.slice(index + separator.length).trim();
+    if (baseName && isMeaninglessAggregateSourceLabel(sourceLabel)) {
+      return baseName;
+    }
+  }
+
+  return text;
+}
+
 function isAdvertisementNodeName(value) {
   const text = normalizeNodeNameForMatching((value || "").toString().trim());
   if (!text) {
@@ -402,8 +430,12 @@ function isAdvertisementNodeName(value) {
 }
 
 function getSanitizedNodeName(name, nameMap) {
-  if (!isAdvertisementNodeName(name)) {
-    return name;
+  const normalizedName = stripMeaninglessAggregateSourceLabel(name);
+  if (!isAdvertisementNodeName(normalizedName)) {
+    if (normalizedName !== name && nameMap instanceof Map && !nameMap.has(name)) {
+      nameMap.set(name, normalizedName);
+    }
+    return normalizedName;
   }
 
   if (!nameMap.has(name)) {
@@ -412,6 +444,9 @@ function getSanitizedNodeName(name, nameMap) {
       replacement = createRandomNodeName();
     } while (nameMap.has(replacement));
     nameMap.set(name, replacement);
+    if (normalizedName !== name && !nameMap.has(normalizedName)) {
+      nameMap.set(normalizedName, replacement);
+    }
   }
 
   return nameMap.get(name);
@@ -4093,9 +4128,11 @@ async function tryServeAggregatePreRegistrationCache(response, request, type, re
     return true;
   }
 
-  const bodyBuffer = upgradeLegacyCachedAggregateBody(
-    type,
-    Buffer.from(cacheEntry.bodyBase64, "base64"),
+  const bodyBuffer = sanitizeSubscriptionBody(
+    upgradeLegacyCachedAggregateBody(
+      type,
+      Buffer.from(cacheEntry.bodyBase64, "base64"),
+    ),
   );
   if (bodyBuffer.length === 0) {
     sendEmptyAggregateSubscription(response, request, type, runtime);
