@@ -4091,6 +4091,64 @@ async function runAggregatePreRegistrationCycle(trigger = "scheduled") {
   return aggregatePreRegistrationJob;
 }
 
+async function tryServeSingleAggregateUpstreamRedirect(
+  response,
+  request,
+  type,
+  relayUser,
+  configuredTargets = [],
+) {
+  if (!Array.isArray(configuredTargets) || configuredTargets.length !== 1) {
+    return false;
+  }
+
+  const target = configuredTargets[0];
+  if (!target?.upstreamId) {
+    return false;
+  }
+
+  let resolvedState = null;
+  try {
+    resolvedState = await resolveRelayState(relayUser.key, target.upstreamId, type, target);
+  } catch {
+    return false;
+  }
+
+  const aggregateSource = {
+    ...target,
+    ...resolvedState,
+  };
+  const redirectLocation = getRelayUpstreamRedirectLocation(aggregateSource, type);
+  if (!redirectLocation) {
+    return false;
+  }
+
+  await appendUserHistory(relayUser.key, target.storageKey || target.upstreamId, {
+    action: "relay_success",
+    title: "Aggregate relay redirected to upstream.",
+    message: `Client fetched ${type} aggregate subscription via upstream redirect.`,
+    mode: ACTIVE_UPSTREAM_MODES.AGGREGATE,
+    relayType: type,
+    requestSource: "relay",
+    registration: aggregateSource?.userState?.latestRegistration || null,
+    usage: aggregateSource?.userState?.latestUsage || null,
+    details: {
+      aggregate: true,
+      redirected: true,
+      instanceLabel: target.instanceLabel || target.upstreamId,
+      storageKey: target.storageKey || target.upstreamId,
+    },
+  }).catch(() => undefined);
+
+  response.writeHead(302, {
+    Location: redirectLocation,
+    "Cache-Control": "no-store, max-age=0, must-revalidate",
+    Pragma: "no-cache",
+  });
+  response.end();
+  return true;
+}
+
 async function tryServeAggregatePreRegistrationCache(response, request, type, relayUser, runtime) {
   const preRegistration = getAggregatePreRegistrationSettings(runtime?.upstreamAggregation);
   if (
@@ -4112,6 +4170,9 @@ async function tryServeAggregatePreRegistrationCache(response, request, type, re
   }
 
   if (!hasUsableCache) {
+    if (await tryServeSingleAggregateUpstreamRedirect(response, request, type, relayUser, configuredTargets)) {
+      return true;
+    }
     sendEmptyAggregateSubscription(response, request, type, runtime);
     return true;
   }
