@@ -64,6 +64,7 @@ const {
 const { loadAggregateClashTemplate } = require("./aggregateClashTemplate");
 const { mergeSubscriptionBodies } = require("./subscriptionMerger");
 const { URL_TYPES } = require("./upstreams/shared/snailApi");
+const { BROWSER_UA } = require("./upstreams/shared/upstreamUtils");
 const {
   getRuntimeAggregateTargets,
   getRuntimeCandidateUpstreamIds,
@@ -93,6 +94,82 @@ let directFetchDispatcher = null;
 const RELAY_TYPES = Object.keys(URL_TYPES);
 const SUPPORTED_TYPES = new Set(["full", ...RELAY_TYPES]);
 const AGGREGATE_STORAGE_DELIMITER = "::";
+const SUBSCRIPTION_FETCH_ACCEPT =
+  "text/plain, application/yaml, application/x-yaml, text/yaml, application/json, */*";
+const SUBSCRIPTION_FETCH_PROFILE_DEFINITIONS = {
+  browser: {
+    key: "browser",
+    headers: {
+      Accept: SUBSCRIPTION_FETCH_ACCEPT,
+      "User-Agent": BROWSER_UA,
+      "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+    },
+  },
+  clash: {
+    key: "clash",
+    headers: {
+      Accept: SUBSCRIPTION_FETCH_ACCEPT,
+      "User-Agent": "Clash",
+      "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+    },
+  },
+  mihomo: {
+    key: "mihomo",
+    headers: {
+      Accept: SUBSCRIPTION_FETCH_ACCEPT,
+      "User-Agent": "Mihomo",
+      "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+    },
+  },
+  clashVerge: {
+    key: "clashVerge",
+    headers: {
+      Accept: SUBSCRIPTION_FETCH_ACCEPT,
+      "User-Agent": "clash-verge/v1.7.7",
+      "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+    },
+  },
+  quantumultx: {
+    key: "quantumultx",
+    headers: {
+      Accept: SUBSCRIPTION_FETCH_ACCEPT,
+      "User-Agent": "Quantumult X",
+      "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+    },
+  },
+  shadowrocket: {
+    key: "shadowrocket",
+    headers: {
+      Accept: SUBSCRIPTION_FETCH_ACCEPT,
+      "User-Agent": "Shadowrocket/2.2.77",
+      "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+    },
+  },
+  surge: {
+    key: "surge",
+    headers: {
+      Accept: SUBSCRIPTION_FETCH_ACCEPT,
+      "User-Agent": "Surge iOS/3000",
+      "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+    },
+  },
+  nekoBox: {
+    key: "nekoBox",
+    headers: {
+      Accept: SUBSCRIPTION_FETCH_ACCEPT,
+      "User-Agent": "NekoBox/Windows",
+      "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+    },
+  },
+};
+const SUBSCRIPTION_FETCH_PROFILE_KEYS_BY_TYPE = {
+  universal: ["mihomo", "quantumultx", "shadowrocket", "browser"],
+  clash: ["mihomo", "clash", "clashVerge", "browser"],
+  shadowrocket: ["shadowrocket", "quantumultx", "mihomo", "browser"],
+  surge: ["surge", "shadowrocket", "mihomo", "browser"],
+  quantumultx: ["quantumultx", "shadowrocket", "mihomo", "browser"],
+  "sing-box": ["nekoBox", "mihomo", "browser"],
+};
 const FORWARDED_HEADERS = new Set([
   "cache-control",
   "content-disposition",
@@ -223,6 +300,31 @@ function buildRelayUrls(origin, relayToken) {
       `${origin}/subscribe/${encodeURIComponent(type)}?token=${encodedToken}`,
     ]),
   );
+}
+
+function buildSubscriptionRequestProfiles(type = "") {
+  const normalizedType = (type || "").toString().trim().toLowerCase();
+  const orderedKeys = [
+    ...(SUBSCRIPTION_FETCH_PROFILE_KEYS_BY_TYPE[normalizedType] || []),
+    "browser",
+  ];
+  const seen = new Set();
+
+  return orderedKeys
+    .map((key) => {
+      const definition = SUBSCRIPTION_FETCH_PROFILE_DEFINITIONS[key];
+      if (!definition || seen.has(definition.key)) {
+        return null;
+      }
+      seen.add(definition.key);
+      return {
+        key: definition.key,
+        headers: {
+          ...(definition.headers || {}),
+        },
+      };
+    })
+    .filter(Boolean);
 }
 
 function buildScopedRelayUrls(origin, relayToken, upstreamId = "") {
@@ -1399,11 +1501,16 @@ function getDirectFetchDispatcher() {
 
 async function fetchUpstreamSubscription(upstreamUrl, timeoutMs = RELAY_FETCH_TIMEOUT_MS, options = {}) {
   ensureProxyConfigured();
+  const requestHeaders =
+    options.headers && typeof options.headers === "object" && !Array.isArray(options.headers)
+      ? options.headers
+      : undefined;
 
   if (options.direct === true) {
     const { request } = require("undici");
     const response = await request(upstreamUrl, {
       dispatcher: getDirectFetchDispatcher(),
+      headers: requestHeaders,
       headersTimeout: normalizeRequestTimeoutMs(timeoutMs),
       bodyTimeout: normalizeRequestTimeoutMs(timeoutMs),
       maxRedirections: 3,
@@ -1440,6 +1547,7 @@ async function fetchUpstreamSubscription(upstreamUrl, timeoutMs = RELAY_FETCH_TI
   }
 
   const requestOptions = {
+    headers: requestHeaders,
     signal: AbortSignal.timeout(normalizeRequestTimeoutMs(timeoutMs)),
   };
 
@@ -1483,21 +1591,40 @@ function countSubscriptionNodes(type, bodyBuffer) {
 }
 
 async function fetchPreferredSubscriptionPayload(type, upstreamUrl, requestTimeoutMs, requestMethod = "GET") {
-  const attemptConfigs = [
-    { key: "direct", direct: true },
-    { key: "proxy", direct: false },
-  ];
+  const requestProfiles = buildSubscriptionRequestProfiles(type);
+  const attemptConfigs = requestProfiles.flatMap((profile, profileIndex) => ([
+    {
+      key: `direct:${profile.key}`,
+      direct: true,
+      transportKey: "direct",
+      requestProfileKey: profile.key,
+      requestProfileIndex: profileIndex,
+      headers: profile.headers,
+    },
+    {
+      key: `proxy:${profile.key}`,
+      direct: false,
+      transportKey: "proxy",
+      requestProfileKey: profile.key,
+      requestProfileIndex: profileIndex,
+      headers: profile.headers,
+    },
+  ]));
   const attemptResults = await Promise.all(
     attemptConfigs.map(async (config) => {
       try {
         const response = await fetchUpstreamSubscription(upstreamUrl, requestTimeoutMs, {
           direct: config.direct,
+          headers: config.headers,
         });
         if (!response.ok) {
           return {
             key: config.key,
             ok: false,
             status: response.status,
+            transportKey: config.transportKey,
+            requestProfileKey: config.requestProfileKey,
+            requestProfileIndex: config.requestProfileIndex,
             error: new Error(`Upstream subscription request failed with status ${response.status}.`),
           };
         }
@@ -1518,6 +1645,9 @@ async function fetchPreferredSubscriptionPayload(type, upstreamUrl, requestTimeo
         return {
           key: config.key,
           ok: true,
+          transportKey: config.transportKey,
+          requestProfileKey: config.requestProfileKey,
+          requestProfileIndex: config.requestProfileIndex,
           headers,
           body,
           nodeCount: requestMethod === "HEAD" ? 0 : countSubscriptionNodes(type, body),
@@ -1527,6 +1657,9 @@ async function fetchPreferredSubscriptionPayload(type, upstreamUrl, requestTimeo
           key: config.key,
           ok: false,
           status: error?.status || null,
+          transportKey: config.transportKey,
+          requestProfileKey: config.requestProfileKey,
+          requestProfileIndex: config.requestProfileIndex,
           error,
         };
       }
@@ -1535,8 +1668,8 @@ async function fetchPreferredSubscriptionPayload(type, upstreamUrl, requestTimeo
 
   const successful = attemptResults.filter((entry) => entry.ok);
   if (successful.length === 0) {
-    const proxyFailure = attemptResults.find((entry) => entry.key === "proxy" && entry.error);
-    const directFailure = attemptResults.find((entry) => entry.key === "direct" && entry.error);
+    const proxyFailure = attemptResults.find((entry) => entry.transportKey === "proxy" && entry.error);
+    const directFailure = attemptResults.find((entry) => entry.transportKey === "direct" && entry.error);
     throw proxyFailure?.error || directFailure?.error || new Error("Upstream subscription request failed.");
   }
 
@@ -1544,10 +1677,13 @@ async function fetchPreferredSubscriptionPayload(type, upstreamUrl, requestTimeo
     if ((right.nodeCount || 0) !== (left.nodeCount || 0)) {
       return (right.nodeCount || 0) - (left.nodeCount || 0);
     }
-    if (left.key === right.key) {
+    if ((left.requestProfileIndex || 0) !== (right.requestProfileIndex || 0)) {
+      return (left.requestProfileIndex || 0) - (right.requestProfileIndex || 0);
+    }
+    if (left.transportKey === right.transportKey) {
       return 0;
     }
-    return left.key === "direct" ? -1 : 1;
+    return left.transportKey === "direct" ? -1 : 1;
   });
 
   return successful[0];
@@ -1569,14 +1705,9 @@ async function fetchFallbackSubscriptionUserInfoHeader(
   }
 
   try {
-    const fallbackResponse = await fetchUpstreamSubscription(clashUrl, timeoutMs);
-    const fallbackHeader = (fallbackResponse.headers.get("subscription-userinfo") || "").trim();
-
-    if (fallbackResponse.body && typeof fallbackResponse.body.cancel === "function") {
-      fallbackResponse.body.cancel().catch(() => undefined);
-    }
-
-    return fallbackResponse.ok ? fallbackHeader : "";
+    const fallbackResponse = await fetchPreferredSubscriptionPayload("clash", clashUrl, timeoutMs, "GET");
+    const fallbackHeader = (fallbackResponse.headers?.["subscription-userinfo"] || "").trim();
+    return fallbackHeader;
   } catch (error) {
     return "";
   }
@@ -2462,11 +2593,14 @@ async function probeUpstreamSubscription(record, supportedTypes = []) {
     return {
       verified: false,
       type: "",
+      nodeCount: 0,
+      requestProfileKey: "",
+      transportKey: "",
       error: "No subscription URL is available for testing.",
     };
   }
 
-  await fetchPreferredSubscriptionPayload(
+  const payload = await fetchPreferredSubscriptionPayload(
     probeType,
     record.clientUrls[probeType],
     RELAY_FETCH_TIMEOUT_MS,
@@ -2477,6 +2611,9 @@ async function probeUpstreamSubscription(record, supportedTypes = []) {
     verified: true,
     type: probeType,
     url: record.clientUrls[probeType] || "",
+    nodeCount: payload.nodeCount || 0,
+    requestProfileKey: payload.requestProfileKey || "",
+    transportKey: payload.transportKey || "",
     error: "",
   };
 }
@@ -2502,6 +2639,32 @@ function buildUpstreamFallbackCandidateId(candidate = {}) {
     .map((value) => (value || "").toString().trim())
     .filter(Boolean)
     .join(":");
+}
+
+function getVerifiedSubscriptionNodeCount(verification = null) {
+  return Number.parseInt(verification?.subscriptionTest?.nodeCount, 10) || 0;
+}
+
+function compareReusableVerificationResults(left = {}, right = {}) {
+  const leftSubscriptionVerified = Boolean(left?.subscriptionTest?.verified);
+  const rightSubscriptionVerified = Boolean(right?.subscriptionTest?.verified);
+  if (leftSubscriptionVerified !== rightSubscriptionVerified) {
+    return rightSubscriptionVerified ? 1 : -1;
+  }
+
+  const leftNodeCount = getVerifiedSubscriptionNodeCount(left);
+  const rightNodeCount = getVerifiedSubscriptionNodeCount(right);
+  if (leftNodeCount !== rightNodeCount) {
+    return rightNodeCount - leftNodeCount;
+  }
+
+  const leftUsageVerified = Boolean(left?.usage);
+  const rightUsageVerified = Boolean(right?.usage);
+  if (leftUsageVerified !== rightUsageVerified) {
+    return rightUsageVerified ? 1 : -1;
+  }
+
+  return toTimestamp(right?.sortAt || "") - toTimestamp(left?.sortAt || "");
 }
 
 async function collectUpstreamFallbackCandidates(upstreamId) {
@@ -2602,6 +2765,7 @@ async function verifyUpstreamRecordForTest(module, upstreamId, upstreamConfig, c
     source: candidate.source || "",
     userKey: candidate.userKey || "",
     storageKey: candidate.storageKey || upstreamId,
+    sortAt: candidate.sortAt || "",
     record,
     usage,
     queryError,
@@ -2617,14 +2781,23 @@ async function findReusableUpstreamTestResult(module, upstreamId, upstreamConfig
     return null;
   }
 
-  for (const candidate of candidates) {
-    const result = await verifyUpstreamRecordForTest(module, upstreamId, upstreamConfig, candidate);
-    if (result.verified) {
-      return result;
-    }
+  const results = await Promise.all(
+    candidates.map(async (candidate) => {
+      try {
+        return await verifyUpstreamRecordForTest(module, upstreamId, upstreamConfig, candidate);
+      } catch {
+        return null;
+      }
+    }),
+  );
+
+  const verifiedResults = results.filter((result) => result?.verified);
+  if (verifiedResults.length === 0) {
+    return null;
   }
 
-  return null;
+  verifiedResults.sort(compareReusableVerificationResults);
+  return verifiedResults[0];
 }
 
 async function persistVerifiedUpstreamTestResult(userKey, upstreamId, verification, runtime = null) {
@@ -2665,6 +2838,9 @@ async function persistVerifiedUpstreamTestResult(userKey, upstreamId, verificati
         source: verification.source || "",
         queryVerified: Boolean(verification.usage),
         subscriptionVerified: Boolean(verification.subscriptionTest?.verified),
+        subscriptionNodeCount: Number.parseInt(verification.subscriptionTest?.nodeCount, 10) || 0,
+        subscriptionFetchProfile: verification.subscriptionTest?.requestProfileKey || "",
+        subscriptionFetchTransport: verification.subscriptionTest?.transportKey || "",
       },
     });
   }
@@ -4144,6 +4320,9 @@ async function handleTestUpstream(request, response) {
       queryError: verification.queryError,
       subscriptionVerified: Boolean(verification.subscriptionTest?.verified),
       subscriptionType: verification.subscriptionTest?.type || "",
+      subscriptionNodeCount: Number.parseInt(verification.subscriptionTest?.nodeCount, 10) || 0,
+      subscriptionFetchProfile: verification.subscriptionTest?.requestProfileKey || "",
+      subscriptionFetchTransport: verification.subscriptionTest?.transportKey || "",
       subscriptionUrl: verification.subscriptionTest?.url || "",
       subscriptionError: verification.subscriptionError,
       clientUrls,
