@@ -1400,12 +1400,48 @@ function getDirectFetchDispatcher() {
 async function fetchUpstreamSubscription(upstreamUrl, timeoutMs = RELAY_FETCH_TIMEOUT_MS, options = {}) {
   ensureProxyConfigured();
 
+  if (options.direct === true) {
+    const { request } = require("undici");
+    const response = await request(upstreamUrl, {
+      dispatcher: getDirectFetchDispatcher(),
+      headersTimeout: normalizeRequestTimeoutMs(timeoutMs),
+      bodyTimeout: normalizeRequestTimeoutMs(timeoutMs),
+      maxRedirections: 3,
+    });
+    return {
+      ok: response.statusCode >= 200 && response.statusCode < 300,
+      status: response.statusCode,
+      headers: {
+        forEach(callback) {
+          Object.entries(response.headers || {}).forEach(([key, value]) => {
+            if (Array.isArray(value)) {
+              value.forEach((item) => callback(item, key));
+              return;
+            }
+            callback(value, key);
+          });
+        },
+        get(name) {
+          const value = response.headers?.[(name || "").toLowerCase()];
+          if (Array.isArray(value)) {
+            return value.join(", ");
+          }
+          return value || null;
+        },
+      },
+      arrayBuffer: async () => {
+        const bodyBuffer = Buffer.from(await response.body.arrayBuffer());
+        return bodyBuffer.buffer.slice(
+          bodyBuffer.byteOffset,
+          bodyBuffer.byteOffset + bodyBuffer.byteLength,
+        );
+      },
+    };
+  }
+
   const requestOptions = {
     signal: AbortSignal.timeout(normalizeRequestTimeoutMs(timeoutMs)),
   };
-  if (options.direct === true) {
-    requestOptions.dispatcher = getDirectFetchDispatcher();
-  }
 
   return fetch(upstreamUrl, requestOptions);
 }
