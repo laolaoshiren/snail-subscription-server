@@ -740,6 +740,37 @@ textarea {
   align-content: start;
 }
 
+.upstream-test-result {
+  display: grid;
+  gap: 14px;
+  margin-top: 12px;
+}
+
+.upstream-test-meta {
+  padding: 0 2px;
+}
+
+.upstream-test-sections {
+  display: grid;
+  gap: 14px;
+}
+
+.upstream-test-section {
+  padding: 14px;
+  border-radius: 16px;
+  border: 1px solid var(--line);
+  background: rgba(18, 28, 40, 0.82);
+}
+
+.upstream-test-section .panel-head {
+  margin-bottom: 0;
+}
+
+.upstream-test-section h3 {
+  margin: 0;
+  font-size: 1rem;
+}
+
 .link-card {
   display: grid;
   gap: 10px;

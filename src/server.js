@@ -54,6 +54,7 @@ const {
   getUserState,
   listUserStates,
   loadRelayState,
+  updateUserState,
 } = require("./registrationStore");
 const {
   getUpstreamModule,
@@ -1265,22 +1266,22 @@ function buildUserSummary(user, userState) {
   };
 }
 
-function filterRelayUrlsBySupportedTypes(relayUrls, supportedTypes) {
-  if (!relayUrls || typeof relayUrls !== "object") {
+function filterUrlMapBySupportedTypes(urls, supportedTypes) {
+  if (!urls || typeof urls !== "object") {
     return {};
   }
 
   const allowedTypes = Array.isArray(supportedTypes) && supportedTypes.length > 0
     ? supportedTypes
-    : Object.keys(relayUrls);
+    : Object.keys(urls);
 
   return Object.fromEntries(
-    Object.entries(relayUrls).filter(([type]) => allowedTypes.includes(type)),
+    Object.entries(urls).filter(([type]) => allowedTypes.includes(type)),
   );
 }
 
 function shapeRegistrationResponse(user, upstream, userState, type, relayUrls, warning = "") {
-  const filteredRelayUrls = filterRelayUrlsBySupportedTypes(relayUrls, upstream?.supportedTypes);
+  const filteredRelayUrls = filterUrlMapBySupportedTypes(relayUrls, upstream?.supportedTypes);
   const subscriptionUrl = type === "full" ? filteredRelayUrls.universal : filteredRelayUrls[type];
 
   return {
@@ -2264,6 +2265,7 @@ async function probeUpstreamSubscription(record, supportedTypes = []) {
   return {
     verified: true,
     type: probeType,
+    url: record.clientUrls[probeType] || "",
     error: "",
   };
 }
@@ -2412,6 +2414,113 @@ async function findReusableUpstreamTestResult(module, upstreamId, upstreamConfig
   }
 
   return null;
+}
+
+async function persistVerifiedUpstreamTestResult(userKey, upstreamId, verification, runtime = null) {
+  const normalizedUserKey = normalizeUserKey(userKey);
+  const normalizedRuntime = runtime || await getActiveUpstreamRuntime();
+  const persistedAt = new Date().toISOString();
+  const mergedRegistration = mergeRegistrationWithUsage(verification.record, verification.usage);
+  const relayPersisted = Boolean(mergedRegistration);
+
+  if (relayPersisted) {
+    await updateUserState(normalizedUserKey, upstreamId, async (userState) => {
+      userState.latestRegistration = mergedRegistration;
+      userState.latestUsage = verification.usage || userState.latestUsage || null;
+    });
+
+    await appendUserHistory(normalizedUserKey, upstreamId, {
+      action: "manual_test",
+      title: verification.source === "fresh_registration" ? "上游测试成功并已缓存" : "复用缓存账号完成上游测试",
+      message:
+        verification.source === "fresh_registration"
+          ? "测试注册成功，已写入当前用户状态，并可复用于后续调度。"
+          : "本次测试命中限流兜底，已复用可用账号并刷新当前用户状态。",
+      mode: "",
+      decision: verification.source === "fresh_registration" ? "register" : "reuse",
+      relayType: verification.subscriptionTest?.type || "",
+      requestSource: "manual",
+      registration: mergedRegistration,
+      usage: verification.usage || null,
+      details: {
+        source: verification.source || "",
+        queryVerified: Boolean(verification.usage),
+        subscriptionVerified: Boolean(verification.subscriptionTest?.verified),
+      },
+    });
+  }
+
+  const configuredTargets =
+    normalizedRuntime.activeUpstreamMode === ACTIVE_UPSTREAM_MODES.AGGREGATE
+      ? await getRuntimeAggregateTargets("")
+      : [];
+  const matchingTarget =
+    configuredTargets.find((target) => target.upstreamId === upstreamId)
+    || {
+      upstreamId,
+      storageKey: upstreamId,
+      instanceNumber: 1,
+      instanceLabel: upstreamId,
+    };
+  const sourcePoolEntry = mergedRegistration && verification.subscriptionTest?.verified
+    ? createAggregateSourcePoolEntry(
+        {
+          ...matchingTarget,
+          id: buildAggregateSourcePoolUniqueKey({
+            ...matchingTarget,
+            registration: mergedRegistration,
+          }),
+          lastValidatedAt: persistedAt,
+          lastValidationError: "",
+          registration: mergedRegistration,
+          latestUsage: verification.usage || null,
+        },
+        persistedAt,
+      )
+    : null;
+
+  let aggregateUserCount = 0;
+  const aggregateStorageKeys = [];
+  if (sourcePoolEntry) {
+    const preRegistration = getAggregatePreRegistrationSettings(normalizedRuntime.upstreamAggregation);
+    const relayUsers = await listRelayUsers();
+    const aggregateResults = await Promise.all(
+      relayUsers.map(async (relayUser) => {
+        const currentUserState = await getAggregateCacheUserState(relayUser.key);
+        const mergedSourcePool = mergeAggregateSourcePoolEntries(
+          [
+            ...(Array.isArray(currentUserState?.sourcePool) ? currentUserState.sourcePool : []),
+            sourcePoolEntry,
+          ],
+          preRegistration.maxSources,
+        );
+        await replaceAggregateCacheUserState(relayUser.key, {
+          cacheEntries: currentUserState?.cacheEntries || {},
+          sourcePool: mergedSourcePool,
+        });
+        return mergedSourcePool.length > 0;
+      }),
+    );
+    aggregateUserCount = aggregateResults.filter(Boolean).length;
+    aggregateStorageKeys.push(sourcePoolEntry.storageKey || upstreamId);
+  }
+
+  const aggregateRefreshScheduled =
+    normalizedRuntime.activeUpstreamMode === ACTIVE_UPSTREAM_MODES.AGGREGATE
+    && sourcePoolEntry !== null;
+  if (aggregateRefreshScheduled) {
+    aggregatePreRegistrationImmediateRequested = true;
+    scheduleAggregatePreRegistration().catch(() => undefined);
+  }
+
+  return {
+    userKey: normalizedUserKey,
+    relayPersisted,
+    aggregateUserCount,
+    aggregateStorageKeys,
+    aggregateRefreshScheduled,
+    persistedAt,
+  };
 }
 
 async function fetchResolvedSubscriptionSource(source, type, requestMethod = "GET", options = {}) {
@@ -2816,7 +2925,13 @@ async function buildAggregateCacheEntriesForUser(
 }
 
 function getAggregateSourcePoolEntryTimestamp(entry = {}) {
-  return toTimestamp(entry.savedAt || entry.registration?.createdAt || "");
+  return toTimestamp(
+    pickLatestIso([
+      entry.lastValidatedAt,
+      entry.savedAt,
+      entry.registration?.createdAt,
+    ]),
+  );
 }
 
 function getAggregateValidatedEntryTimestamp(entry = {}) {
@@ -2879,6 +2994,42 @@ function createAggregateSourcePoolEntry(target = {}, savedAt = "") {
     registration,
     latestUsage: target?.userState?.latestUsage || target?.latestUsage || null,
   };
+}
+
+function buildAggregateSourcePoolUniqueKey(entry = {}) {
+  const registration = entry?.registration || entry?.userState?.latestRegistration || null;
+  const storageKey = (entry.storageKey || entry.upstreamId || "").toString().trim();
+  return [
+    storageKey,
+    (registration?.email || "").toString().trim(),
+    (registration?.createdAt || "").toString().trim(),
+  ]
+    .filter(Boolean)
+    .join(":");
+}
+
+function mergeAggregateSourcePoolEntries(
+  entries = [],
+  limit = DEFAULT_AGGREGATE_PREREGISTRATION_MAX_SOURCES,
+) {
+  const normalizedLimit = Math.max(
+    1,
+    Math.min(
+      50,
+      Number.parseInt(limit, 10) || DEFAULT_AGGREGATE_PREREGISTRATION_MAX_SOURCES,
+    ),
+  );
+  const uniqueEntries = new Map();
+
+  sortAggregateSourcePoolEntries(entries).forEach((entry) => {
+    const uniqueKey = buildAggregateSourcePoolUniqueKey(entry);
+    if (!uniqueKey || uniqueEntries.has(uniqueKey)) {
+      return;
+    }
+    uniqueEntries.set(uniqueKey, entry);
+  });
+
+  return Array.from(uniqueEntries.values()).slice(0, normalizedLimit);
 }
 
 function trimAggregateValidatedEntries(entries = [], limit = DEFAULT_AGGREGATE_PREREGISTRATION_MAX_SOURCES) {
@@ -3622,6 +3773,7 @@ async function handleUpdateSettings(request, response) {
 async function handleTestUpstream(request, response) {
   const body = await readJsonBody(request);
   const upstreamId = (body.upstreamId || "").toString().trim();
+  const userKey = normalizeUserKey(body.userKey);
   if (!upstreamId) {
     sendJson(response, 400, {
       success: false,
@@ -3654,6 +3806,7 @@ async function handleTestUpstream(request, response) {
 
   let verification = null;
   let usedFallback = false;
+  const runtime = await getActiveUpstreamRuntime();
 
   try {
     const record = await module.register({
@@ -3682,6 +3835,23 @@ async function handleTestUpstream(request, response) {
     usedFallback = true;
   }
 
+  const persisted = await persistVerifiedUpstreamTestResult(userKey, upstreamId, verification, runtime);
+  const relayToken = await getRelayToken(userKey);
+  const clientUrls = filterUrlMapBySupportedTypes(
+    verification.record?.clientUrls,
+    Array.isArray(module.manifest?.supportedTypes) ? module.manifest.supportedTypes : [],
+  );
+  const supportedTypes = Array.from(
+    new Set([
+      ...Object.keys(clientUrls),
+      ...(Array.isArray(module.manifest?.supportedTypes) ? module.manifest.supportedTypes : []),
+    ]),
+  ).filter((type) => Boolean(clientUrls[type]));
+  const relayUrls = filterUrlMapBySupportedTypes(
+    buildRelayUrls(await getRequestOrigin(request), relayToken),
+    supportedTypes,
+  );
+
   sendJson(response, 200, {
     success: true,
     message: usedFallback
@@ -3698,18 +3868,23 @@ async function handleTestUpstream(request, response) {
     test: {
       upstreamId,
       label: testConfig.name || module.manifest.label || upstreamId,
-      supportedTypes: Array.isArray(module.manifest.supportedTypes) ? module.manifest.supportedTypes : [],
+      supportedTypes,
       registration: {
         email: verification.record?.email || "",
         upstreamSite: verification.record?.upstreamSite || "",
+        createdAt: verification.record?.createdAt || "",
       },
       queryVerified: Boolean(verification.usage),
       queryError: verification.queryError,
       subscriptionVerified: Boolean(verification.subscriptionTest?.verified),
       subscriptionType: verification.subscriptionTest?.type || "",
+      subscriptionUrl: verification.subscriptionTest?.url || "",
       subscriptionError: verification.subscriptionError,
+      clientUrls,
+      relayUrls,
       usedFallback,
       fallbackSource: usedFallback ? verification.source : "",
+      persisted,
     },
   });
 }

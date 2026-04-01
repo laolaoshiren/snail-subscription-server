@@ -104,6 +104,9 @@ const testUpstreamButton = document.querySelector("#testUpstreamButton");
 const saveUpstreamButton = document.querySelector("#saveUpstreamButton");
 const saveSystemButton = document.querySelector("#saveSystemButton");
 const savePasswordButton = document.querySelector("#savePasswordButton");
+const upstreamTestResult = document.querySelector("#upstreamTestResult");
+const upstreamTestResultSummary = document.querySelector("#upstreamTestResultSummary");
+const upstreamTestResultBody = document.querySelector("#upstreamTestResultBody");
 const AGGREGATE_CONFIG_VALUE = "__aggregate_config__";
 const POLLING_UPSTREAM_VALUE = "__polling__";
 const AGGREGATE_UPSTREAM_VALUE = "__aggregate__";
@@ -236,6 +239,169 @@ function showCopyToast(message, tone = "success") {
   copyToastTimer = window.setTimeout(() => {
     hideCopyToast();
   }, 1800);
+}
+
+function clearUpstreamTestResult() {
+  if (!upstreamTestResult || !upstreamTestResultBody || !upstreamTestResultSummary) {
+    return;
+  }
+
+  upstreamTestResult.classList.add("hidden");
+  upstreamTestResultSummary.textContent = "测试完成后，这里会显示直连测试链接、本站转发链接和缓存写入结果。";
+  upstreamTestResultBody.innerHTML = "";
+}
+
+function createContextCard(label, value) {
+  const card = document.createElement("article");
+  card.className = "context-card";
+
+  const title = document.createElement("span");
+  title.textContent = label;
+
+  const strong = document.createElement("strong");
+  strong.textContent = value || "暂无";
+
+  card.append(title, strong);
+  return card;
+}
+
+function createTestUrlCard(type, url, sectionTitle = "") {
+  const label = protocolLabels[type] || type;
+  const card = document.createElement("article");
+  card.className = "link-card";
+
+  const head = document.createElement("div");
+  head.className = "link-head";
+  head.innerHTML = `<strong>${label}</strong><span>${sectionTitle ? `${sectionTitle} · ` : ""}${type.toUpperCase()}</span>`;
+
+  const input = document.createElement("input");
+  input.className = "link-input";
+  input.type = "text";
+  input.readOnly = true;
+  input.value = url || "";
+
+  const foot = document.createElement("div");
+  foot.className = "link-foot";
+
+  const actions = document.createElement("div");
+  actions.className = "link-actions";
+
+  const copyButton = document.createElement("button");
+  copyButton.className = "ghost-button small-button";
+  copyButton.type = "button";
+  copyButton.textContent = "复制";
+  copyButton.disabled = !url;
+  copyButton.addEventListener("click", async () => {
+    if (!url) {
+      return;
+    }
+
+    await copyText(url);
+    showCopyToast(`${sectionTitle || "链接"} ${label} 已复制。`);
+  });
+
+  actions.append(copyButton);
+  foot.append(actions);
+  card.append(head, input, foot);
+  return card;
+}
+
+function renderUpstreamTestResult(test) {
+  if (!upstreamTestResult || !upstreamTestResultBody || !upstreamTestResultSummary) {
+    return;
+  }
+
+  upstreamTestResultBody.innerHTML = "";
+  if (!test || typeof test !== "object") {
+    clearUpstreamTestResult();
+    return;
+  }
+
+  upstreamTestResult.classList.remove("hidden");
+  upstreamTestResultSummary.textContent = test.subscriptionError
+    ? `测试已完成，但订阅校验失败：${test.subscriptionError}`
+    : test.queryError
+      ? `测试已完成，订阅可拉取，但状态查询失败：${test.queryError}`
+      : "测试已完成，下面展示本次真实校验过的链接和缓存写入结果。";
+
+  const overview = document.createElement("div");
+  overview.className = "mini-status-grid";
+  overview.append(
+    createContextCard("测试邮箱", test.registration?.email || "暂无"),
+    createContextCard("上游站点", test.registration?.upstreamSite || "暂无"),
+    createContextCard("订阅校验", test.subscriptionType || "未校验"),
+    createContextCard(
+      "写入结果",
+      test.persisted?.aggregateUserCount > 0
+        ? `用户态 + ${test.persisted.aggregateUserCount} 个缓存池`
+        : test.persisted?.relayPersisted
+          ? "仅写入当前用户状态"
+          : "未写入",
+    ),
+  );
+
+  const detail = document.createElement("div");
+  detail.className = "history-meta upstream-test-meta";
+  const detailParts = [];
+  if (test.usedFallback) {
+    detailParts.push(`本次测试命中兜底：${test.fallbackSource || "cached"}`);
+  }
+  if (test.subscriptionUrl) {
+    detailParts.push(`实际校验：${test.subscriptionType || "subscription"}`);
+  }
+  if (test.persisted?.aggregateRefreshScheduled) {
+    detailParts.push("已触发缓存预注册立即刷新");
+  }
+  if (test.persisted?.persistedAt) {
+    detailParts.push(`写入时间：${formatDateTime(test.persisted.persistedAt)}`);
+  }
+  detail.textContent = detailParts.join(" · ") || "本次结果可直接复制下面的链接验证。";
+
+  const sections = document.createElement("div");
+  sections.className = "upstream-test-sections";
+
+  [
+    {
+      title: "直连测试链接",
+      hint: "这些是本次测试实际使用的上游链接。",
+      urls: test.clientUrls || {},
+    },
+    {
+      title: "本站转发链接",
+      hint: "这些是当前用户可直接导入客户端的本站链接。",
+      urls: test.relayUrls || {},
+    },
+  ].forEach((config) => {
+    const block = document.createElement("section");
+    block.className = "upstream-test-section";
+
+    const heading = document.createElement("div");
+    heading.className = "panel-head compact-head";
+    const title = document.createElement("h3");
+    title.textContent = config.title;
+    const hint = document.createElement("p");
+    hint.textContent = config.hint;
+    heading.append(title, hint);
+
+    const urlEntries = Object.entries(config.urls || {}).filter(([, value]) => Boolean(value));
+    if (urlEntries.length === 0) {
+      const empty = document.createElement("p");
+      empty.className = "form-hint";
+      empty.textContent = "本次没有可展示的链接。";
+      block.append(heading, empty);
+    } else {
+      const grid = document.createElement("div");
+      grid.className = "links-grid";
+      urlEntries.forEach(([type, url]) => {
+        grid.appendChild(createTestUrlCard(type, url, config.title));
+      });
+      block.append(heading, grid);
+    }
+
+    sections.appendChild(block);
+  });
+
+  upstreamTestResultBody.append(overview, detail, sections);
 }
 
 function renderLoginHint() {
@@ -1508,6 +1674,7 @@ function syncUpstreamForm() {
   const selectedUpstream = getSelectedUpstream();
   const runtimeSupportsInviteCode = upstreamSupportsInviteCode(runtimeUpstream);
 
+  clearUpstreamTestResult();
   setText(activeUpstreamLabel, getRuntimeSelectionLabel(runtimeUpstream));
   setText(modeDescription, describeRuntimeSelection(runtimeUpstream));
 
@@ -1715,6 +1882,7 @@ function collectUpstreamFormPayload(upstream) {
 
   return {
     upstreamId: upstream?.id || state.selectedUpstreamId,
+    userKey: state.currentUserKey,
     name: (formData.get("name") || "").toString().trim(),
     remark: (formData.get("remark") || "").toString().trim(),
     enabled: upstreamEnabledInput?.checked,
@@ -2260,15 +2428,25 @@ if (testUpstreamButton) {
       });
 
       const typeCount = Array.isArray(payload.test?.supportedTypes) ? payload.test.supportedTypes.length : 0;
+      const persistSummary = payload.test?.persisted?.aggregateUserCount > 0
+        ? `\uFF0C\u5E76\u5DF2\u5199\u5165 ${payload.test.persisted.aggregateUserCount} \u4E2A\u7F13\u5B58\u6C60`
+        : payload.test?.persisted?.relayPersisted
+          ? "\uFF0C\u5E76\u5DF2\u5199\u5165\u5F53\u524D\u7528\u6237\u72B6\u6001"
+          : "";
       const summary = payload.test?.subscriptionError
-        ? `注册可用，但订阅校验失败：${payload.test.subscriptionError}`
+        ? `\u6CE8\u518C\u53EF\u7528\uFF0C\u4F46\u8BA2\u9605\u6821\u9A8C\u5931\u8D25\uFF1A${payload.test.subscriptionError}${persistSummary}`
         : payload.test?.queryVerified
-          ? `测试通过：已完成注册、状态查询和 ${payload.test?.subscriptionType || "订阅"} 校验，支持 ${typeCount} 种订阅。`
+          ? `\u6D4B\u8BD5\u901A\u8FC7\uFF1A\u5DF2\u5B8C\u6210\u6CE8\u518C\u3001\u72B6\u6001\u67E5\u8BE2\u548C ${payload.test?.subscriptionType || "\u8BA2\u9605"} \u6821\u9A8C\uFF0C\u652F\u6301 ${typeCount} \u79CD\u8BA2\u9605${persistSummary}\u3002`
           : payload.test?.queryError
-            ? `注册和订阅可用，但状态查询失败：${payload.test.queryError}`
-            : `测试通过：已完成注册和 ${payload.test?.subscriptionType || "订阅"} 校验，支持 ${typeCount} 种订阅。`;
+            ? `\u6CE8\u518C\u548C\u8BA2\u9605\u53EF\u7528\uFF0C\u4F46\u72B6\u6001\u67E5\u8BE2\u5931\u8D25\uFF1A${payload.test.queryError}${persistSummary}`
+            : `\u6D4B\u8BD5\u901A\u8FC7\uFF1A\u5DF2\u5B8C\u6210\u6CE8\u518C\u548C ${payload.test?.subscriptionType || "\u8BA2\u9605"} \u6821\u9A8C\uFF0C\u652F\u6301 ${typeCount} \u79CD\u8BA2\u9605${persistSummary}\u3002`;
+      renderUpstreamTestResult(payload.test);
       setStatus(summary, payload.test?.subscriptionError || payload.test?.queryError ? "warning" : "success");
+      if (!isAggregateMode() && state.activeUpstreamId === upstream.id) {
+        loadUserState({ localOnly: true }).catch(() => undefined);
+      }
     } catch (error) {
+      clearUpstreamTestResult();
       if (error.status === 401) {
         showLogin();
         setStatus("登录状态已失效，请重新输入密码。", "error");
