@@ -367,9 +367,9 @@ function renderUpstreamTestResult(test) {
       urls: test.clientUrls || {},
     },
     {
-      title: "本站转发链接",
-      hint: "这些是当前用户可直接导入客户端的本站链接。",
-      urls: test.relayUrls || {},
+      title: "本站测试转发链接",
+      hint: "这些链接会固定转发到本次测试的上游，不受当前聚合模式影响。",
+      urls: test.scopedRelayUrls || {},
     },
   ].forEach((config) => {
     const block = document.createElement("section");

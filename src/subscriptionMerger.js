@@ -122,6 +122,7 @@ function appendSourceLabel(name, sourceLabel) {
 const AGGREGATE_HEALTHCHECK_URL = "http://www.gstatic.com/generate_204";
 const AGGREGATE_HEALTHCHECK_INTERVAL_SECONDS = 30;
 const AGGREGATE_HEALTHCHECK_TIMEOUT_MS = 5000;
+const MINIMAL_GLOBAL_GROUP_NAME = "GLOBAL";
 const MAIN_SELECTOR_GROUP_NAME = "\ud83d\udd30 \u8282\u70b9\u9009\u62e9";
 const AUTO_SELECT_GROUP_NAME = "\u267b\ufe0f \u81ea\u52a8\u9009\u62e9";
 const DIRECT_GROUP_NAME = "\ud83c\udfaf \u5168\u7403\u76f4\u8fde";
@@ -644,6 +645,55 @@ function mergeClashTemplate(template, proxies) {
   return nextTemplate;
 }
 
+function buildMinimalClashConfig(proxies) {
+  const proxyNames = proxies.map((proxy) => proxy?.name).filter(Boolean);
+  const selectableProxyNames = proxyNames.length > 0
+    ? [AUTO_SELECT_GROUP_NAME, FALLBACK_GROUP_NAME, ...proxyNames, "DIRECT"]
+    : ["DIRECT"];
+  const proxyGroups = [
+    {
+      name: MINIMAL_GLOBAL_GROUP_NAME,
+      type: "select",
+      proxies: selectableProxyNames,
+    },
+  ];
+
+  if (proxyNames.length > 0) {
+    proxyGroups.push(
+      {
+        name: AUTO_SELECT_GROUP_NAME,
+        type: "url-test",
+        proxies: proxyNames,
+        url: AGGREGATE_HEALTHCHECK_URL,
+        interval: AGGREGATE_HEALTHCHECK_INTERVAL_SECONDS,
+        lazy: false,
+        timeout: AGGREGATE_HEALTHCHECK_TIMEOUT_MS,
+      },
+      {
+        name: FALLBACK_GROUP_NAME,
+        type: "fallback",
+        proxies: proxyNames,
+        url: AGGREGATE_HEALTHCHECK_URL,
+        interval: AGGREGATE_HEALTHCHECK_INTERVAL_SECONDS,
+        lazy: false,
+        timeout: AGGREGATE_HEALTHCHECK_TIMEOUT_MS,
+      },
+      {
+        name: DIRECT_GROUP_NAME,
+        type: "select",
+        proxies: ["DIRECT"],
+      },
+    );
+  }
+
+  return {
+    mode: "global",
+    "log-level": "info",
+    proxies,
+    "proxy-groups": proxyGroups,
+  };
+}
+
 function mergeClashBodies(entries, options = {}) {
   const usedNames = new Set();
   const proxies = [];
@@ -674,6 +724,8 @@ function mergeClashBodies(entries, options = {}) {
   const mergedConfig =
     options.clashTemplate && typeof options.clashTemplate === "object"
       ? mergeClashTemplate(options.clashTemplate, proxies)
+      : options.minimalGroups
+        ? buildMinimalClashConfig(proxies)
       : {
           proxies,
         };

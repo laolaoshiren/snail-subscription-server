@@ -224,6 +224,22 @@ function buildRelayUrls(origin, relayToken) {
   );
 }
 
+function buildScopedRelayUrls(origin, relayToken, upstreamId = "") {
+  const baseUrls = buildRelayUrls(origin, relayToken);
+  const normalizedUpstreamId = (upstreamId || "").toString().trim();
+  if (!normalizedUpstreamId) {
+    return baseUrls;
+  }
+
+  return Object.fromEntries(
+    Object.entries(baseUrls).map(([type, url]) => {
+      const scopedUrl = new URL(url);
+      scopedUrl.searchParams.set("upstreamId", normalizedUpstreamId);
+      return [type, scopedUrl.toString()];
+    }),
+  );
+}
+
 async function buildRelayUrlsByUser(origin) {
   const relayUsers = await listRelayUsers();
   return Object.fromEntries(
@@ -2074,6 +2090,7 @@ function buildAggregateMergedHeaders(type, successfulFetches = [], title = "") {
 async function buildAggregateMergedBody(type, successfulFetches = [], options = {}) {
   const clashTemplate =
     type === "clash" && options.stripRules !== true ? await loadAggregateClashTemplate() : null;
+  const minimalGroups = type === "clash" && options.stripRules === true;
   const mergedBody = sanitizeSubscriptionBody(
     mergeSubscriptionBodies(
       type,
@@ -2083,6 +2100,7 @@ async function buildAggregateMergedBody(type, successfulFetches = [], options = 
       })),
       {
         clashTemplate,
+        minimalGroups,
       },
     ),
   );
@@ -2740,6 +2758,56 @@ async function proxyAggregateSubscription(response, request, type, relayUser, ru
   );
   const mergedBody = await buildAggregateMergedBody(type, successfulFetches);
   sendSubscriptionPayload(response, request.method, mergedHeaders, mergedBody);
+}
+
+async function proxyScopedUpstreamSubscription(response, request, type, relayUser, upstreamId) {
+  const normalizedUpstreamId = (upstreamId || "").toString().trim();
+  if (!normalizedUpstreamId) {
+    sendText(response, 400, "Upstream is required.");
+    return;
+  }
+
+  const upstreamConfig = await getUpstreamConfig(normalizedUpstreamId);
+  if (!upstreamConfig) {
+    sendText(response, 404, "Upstream not found.");
+    return;
+  }
+
+  const userState = await getUserState(relayUser.key, normalizedUpstreamId);
+  if (!userState?.latestRegistration) {
+    sendText(response, 404, "No cached upstream registration is available.");
+    return;
+  }
+
+  const payload = await fetchResolvedSubscriptionSource(
+    {
+      upstreamId: normalizedUpstreamId,
+      storageKey: normalizedUpstreamId,
+      upstreamConfig,
+      userState,
+    },
+    type,
+    request.method,
+    {
+      timeoutMs: RELAY_FETCH_TIMEOUT_MS,
+    },
+  );
+
+  await appendUserHistory(relayUser.key, normalizedUpstreamId, {
+    action: "relay_success",
+    title: "测试转发订阅已返回",
+    message: `客户端成功拉取 ${type} 测试转发订阅。`,
+    relayType: type,
+    requestSource: "relay",
+    registration: userState.latestRegistration,
+    usage: userState.latestUsage || null,
+    details: {
+      scopedRelay: true,
+      upstreamId: normalizedUpstreamId,
+    },
+  });
+
+  sendSubscriptionPayload(response, request.method, payload.headers, payload.body);
 }
 
 async function buildAggregateResponse(request, userKey, type, targets, failures = [], warning = "") {
@@ -3851,6 +3919,10 @@ async function handleTestUpstream(request, response) {
     buildRelayUrls(await getRequestOrigin(request), relayToken),
     supportedTypes,
   );
+  const scopedRelayUrls = filterUrlMapBySupportedTypes(
+    buildScopedRelayUrls(await getRequestOrigin(request), relayToken, upstreamId),
+    supportedTypes,
+  );
 
   sendJson(response, 200, {
     success: true,
@@ -3882,6 +3954,7 @@ async function handleTestUpstream(request, response) {
       subscriptionError: verification.subscriptionError,
       clientUrls,
       relayUrls,
+      scopedRelayUrls,
       usedFallback,
       fallbackSource: usedFallback ? verification.source : "",
       persisted,
@@ -4131,10 +4204,16 @@ async function handleLatestSubscription(request, response, url) {
 
 async function proxySubscription(response, request, type, url) {
   const token = (url.searchParams.get("token") || "").trim();
+  const scopedUpstreamId = (url.searchParams.get("upstreamId") || "").trim();
   const relayUser = await resolveRelayUserByToken(token);
 
   if (!relayUser) {
     sendText(response, 403, "Invalid subscription token.");
+    return;
+  }
+
+  if (scopedUpstreamId) {
+    await proxyScopedUpstreamSubscription(response, request, type, relayUser, scopedUpstreamId);
     return;
   }
 
