@@ -205,14 +205,25 @@ function mergeRegistrationWithUsage(record, usage) {
     return null;
   }
 
+  const recordSubscribeUrl = typeof record.subscribeUrl === "string" ? record.subscribeUrl.trim() : "";
+  const usageSubscribeUrl = typeof usage?.subscribeUrl === "string" ? usage.subscribeUrl.trim() : "";
+  const recordClientUrls =
+    record?.clientUrls && typeof record.clientUrls === "object" && Object.keys(record.clientUrls).length > 0
+      ? record.clientUrls
+      : null;
+  const usageClientUrls =
+    usage?.clientUrls && typeof usage.clientUrls === "object" && Object.keys(usage.clientUrls).length > 0
+      ? usage.clientUrls
+      : null;
+
   return {
     ...record,
     email: usage?.email || record.email,
-    subscribeUrl: usage?.subscribeUrl || record.subscribeUrl,
-    clientUrls:
-      usage?.clientUrls && Object.keys(usage.clientUrls).length > 0
-        ? usage.clientUrls
-        : record.clientUrls,
+    // Preserve the registration-time subscription URLs whenever they already exist.
+    // Some upstream status endpoints return a reduced subscribe_url that is valid but
+    // does not match the full node set that the registration step verified.
+    subscribeUrl: recordSubscribeUrl || usageSubscribeUrl || record.subscribeUrl,
+    clientUrls: recordClientUrls || usageClientUrls || record.clientUrls,
     upstreamSite: usage?.upstreamSite || record.upstreamSite,
     apiBase: usage?.apiBase || record.apiBase,
     entryUrl: usage?.entryUrl || record.entryUrl,
