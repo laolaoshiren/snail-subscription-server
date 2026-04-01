@@ -2268,6 +2268,152 @@ async function probeUpstreamSubscription(record, supportedTypes = []) {
   };
 }
 
+function isUpstreamRegistrationRateLimited(error) {
+  const message = (error?.message || "").toString().trim();
+  if (!message) {
+    return false;
+  }
+
+  return /注册频繁|请等待\s*\d+\s*分钟|too many|rate limit|retry later/i.test(message);
+}
+
+function buildUpstreamFallbackCandidateId(candidate = {}) {
+  const record = candidate?.record || {};
+  return [
+    candidate?.source || "",
+    candidate?.storageKey || "",
+    record?.token || "",
+    record?.email || "",
+    record?.createdAt || "",
+  ]
+    .map((value) => (value || "").toString().trim())
+    .filter(Boolean)
+    .join(":");
+}
+
+async function collectUpstreamFallbackCandidates(upstreamId) {
+  const candidates = [];
+  const userStates = await listUserStates(upstreamId);
+
+  userStates.forEach((userState) => {
+    if (!userState?.latestRegistration) {
+      return;
+    }
+
+    candidates.push({
+      source: "relay_state",
+      userKey: userState.userKey || "",
+      storageKey: upstreamId,
+      record: userState.latestRegistration,
+      usage: userState.latestUsage || null,
+      sortAt: pickLatestIso([
+        userState.latestUsage?.queriedAt,
+        userState.latestRegistration?.createdAt,
+        userState.updatedAt,
+      ]),
+    });
+  });
+
+  const aggregateCacheStates = await Promise.all(
+    RELAY_USERS.map(async (relayUser) => ({
+      userKey: relayUser.key,
+      state: await getAggregateCacheUserState(relayUser.key),
+    })),
+  );
+
+  aggregateCacheStates.forEach(({ userKey, state }) => {
+    (Array.isArray(state?.sourcePool) ? state.sourcePool : [])
+      .filter((entry) => (entry?.upstreamId || entry?.storageKey || "") === upstreamId)
+      .forEach((entry) => {
+        candidates.push({
+          source: "aggregate_cache",
+          userKey,
+          storageKey: entry.storageKey || upstreamId,
+          record: entry.registration,
+          usage: entry.latestUsage || null,
+          sortAt: pickLatestIso([
+            entry.lastValidatedAt,
+            entry.savedAt,
+            entry.registration?.createdAt,
+            entry.latestUsage?.queriedAt,
+          ]),
+        });
+      });
+  });
+
+  const uniqueCandidates = new Map();
+  candidates
+    .filter((candidate) => candidate?.record)
+    .sort((left, right) => toTimestamp(right.sortAt) - toTimestamp(left.sortAt))
+    .forEach((candidate) => {
+      const id = buildUpstreamFallbackCandidateId(candidate);
+      if (id && !uniqueCandidates.has(id)) {
+        uniqueCandidates.set(id, candidate);
+      }
+    });
+
+  return Array.from(uniqueCandidates.values());
+}
+
+async function verifyUpstreamRecordForTest(module, upstreamId, upstreamConfig, candidate = {}) {
+  const record = mergeRegistrationWithUsage(candidate.record, candidate.usage);
+  let usage = null;
+  let queryError = "";
+
+  if (module.manifest?.capabilities?.supportsStatusQuery !== false) {
+    try {
+      usage = await module.query({
+        record,
+        upstreamConfig,
+        verbose: false,
+        logger: console,
+      });
+    } catch (error) {
+      queryError = error.message;
+    }
+  }
+
+  let subscriptionTest = null;
+  let subscriptionError = "";
+  try {
+    subscriptionTest = await probeUpstreamSubscription(
+      record,
+      Array.isArray(module.manifest?.supportedTypes) ? module.manifest.supportedTypes : [],
+    );
+  } catch (error) {
+    subscriptionError = error.message;
+  }
+
+  return {
+    upstreamId,
+    source: candidate.source || "",
+    userKey: candidate.userKey || "",
+    storageKey: candidate.storageKey || upstreamId,
+    record,
+    usage,
+    queryError,
+    subscriptionTest,
+    subscriptionError,
+    verified: Boolean(usage || subscriptionTest?.verified),
+  };
+}
+
+async function findReusableUpstreamTestResult(module, upstreamId, upstreamConfig) {
+  const candidates = await collectUpstreamFallbackCandidates(upstreamId);
+  if (candidates.length === 0) {
+    return null;
+  }
+
+  for (const candidate of candidates) {
+    const result = await verifyUpstreamRecordForTest(module, upstreamId, upstreamConfig, candidate);
+    if (result.verified) {
+      return result;
+    }
+  }
+
+  return null;
+}
+
 async function fetchResolvedSubscriptionSource(source, type, requestMethod = "GET", options = {}) {
   const latest = source?.userState?.latestRegistration;
   if (!latest) {
@@ -3506,59 +3652,64 @@ async function handleTestUpstream(request, response) {
     providerSettings: body.providerSettings,
   });
 
-  const record = await module.register({
-    inviteCode: (body.inviteCode || testConfig.inviteCode || "").toString().trim(),
-    upstreamConfig: testConfig,
-    verbose: false,
-    logger: console,
-  });
+  let verification = null;
+  let usedFallback = false;
 
-  let usage = null;
-  let queryError = "";
-  if (module.manifest?.capabilities?.supportsStatusQuery !== false) {
-    try {
-      usage = await module.query({
-        record,
-        upstreamConfig: testConfig,
-        verbose: false,
-        logger: console,
-      });
-    } catch (error) {
-      queryError = error.message;
-    }
-  }
-
-  let subscriptionTest = null;
-  let subscriptionError = "";
   try {
-    subscriptionTest = await probeUpstreamSubscription(
+    const record = await module.register({
+      inviteCode: (body.inviteCode || testConfig.inviteCode || "").toString().trim(),
+      upstreamConfig: testConfig,
+      verbose: false,
+      logger: console,
+    });
+
+    verification = await verifyUpstreamRecordForTest(module, upstreamId, testConfig, {
+      source: "fresh_registration",
       record,
-      Array.isArray(module.manifest?.supportedTypes) ? module.manifest.supportedTypes : [],
-    );
+      usage: null,
+      userKey: "",
+      storageKey: upstreamId,
+    });
   } catch (error) {
-    subscriptionError = error.message;
+    if (!isUpstreamRegistrationRateLimited(error)) {
+      throw error;
+    }
+
+    verification = await findReusableUpstreamTestResult(module, upstreamId, testConfig);
+    if (!verification) {
+      throw error;
+    }
+    usedFallback = true;
   }
 
   sendJson(response, 200, {
     success: true,
-    message: subscriptionError
-      ? `Upstream registration succeeded, but subscription verification failed: ${subscriptionError}`
-      : queryError
-      ? `Upstream registration succeeded, but status query failed: ${queryError}`
+    message: usedFallback
+      ? verification.subscriptionError
+        ? `Upstream registration is temporarily rate-limited, but cached account verification succeeded: ${verification.subscriptionError}`
+        : verification.queryError
+        ? `Upstream registration is temporarily rate-limited, but cached account status verification succeeded: ${verification.queryError}`
+        : "Upstream registration is temporarily rate-limited, but cached account verification succeeded."
+      : verification.subscriptionError
+      ? `Upstream registration succeeded, but subscription verification failed: ${verification.subscriptionError}`
+      : verification.queryError
+      ? `Upstream registration succeeded, but status query failed: ${verification.queryError}`
       : "Upstream test succeeded.",
     test: {
       upstreamId,
       label: testConfig.name || module.manifest.label || upstreamId,
       supportedTypes: Array.isArray(module.manifest.supportedTypes) ? module.manifest.supportedTypes : [],
       registration: {
-        email: record.email || "",
-        upstreamSite: record.upstreamSite || "",
+        email: verification.record?.email || "",
+        upstreamSite: verification.record?.upstreamSite || "",
       },
-      queryVerified: Boolean(usage),
-      queryError,
-      subscriptionVerified: Boolean(subscriptionTest?.verified),
-      subscriptionType: subscriptionTest?.type || "",
-      subscriptionError,
+      queryVerified: Boolean(verification.usage),
+      queryError: verification.queryError,
+      subscriptionVerified: Boolean(verification.subscriptionTest?.verified),
+      subscriptionType: verification.subscriptionTest?.type || "",
+      subscriptionError: verification.subscriptionError,
+      usedFallback,
+      fallbackSource: usedFallback ? verification.source : "",
     },
   });
 }
