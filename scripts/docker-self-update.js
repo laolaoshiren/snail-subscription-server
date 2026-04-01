@@ -51,10 +51,16 @@ const UPDATE_ENV_KEYS = [
   "SNAIL_DOCKER_SOCKET_PATH",
   "SNAIL_DOCKER_COMMAND",
   "SNAIL_DOCKER_COMMAND_ARGS",
+  "SNAIL_DOCKER_NETWORK_MODE",
   "SNAIL_UPDATE_REPO_OWNER",
   "SNAIL_UPDATE_REPO_NAME",
   "SNAIL_UPDATE_BRANCH",
 ];
+
+function normalizeNetworkMode(value) {
+  const normalized = trimValue(value).toLowerCase();
+  return normalized === "host" ? "host" : "bridge";
+}
 
 function readSystemState() {
   try {
@@ -107,13 +113,17 @@ function buildMainContainerRunArgs(context) {
     context.containerName,
     "--restart",
     "unless-stopped",
-    "-p",
-    `${context.port}:${context.port}`,
     "-v",
     `${context.hostDataDir}:/app/data`,
     "-v",
     `${context.socketPath}:${context.socketPath}`,
   ];
+
+  if (context.networkMode === "host") {
+    args.push("--network", "host");
+  } else {
+    args.push("-p", `${context.port}:${context.port}`);
+  }
 
   UPDATE_ENV_KEYS.forEach((key) => {
     const value = trimValue(process.env[key] || "");
@@ -133,6 +143,7 @@ function getContext() {
     hostDataDir: trimValue(process.env.SNAIL_DOCKER_HOST_DATA_DIR || ""),
     port: trimValue(process.env.PORT || ""),
     socketPath: DEFAULT_SOCKET_PATH,
+    networkMode: normalizeNetworkMode(process.env.SNAIL_DOCKER_NETWORK_MODE || ""),
   };
 }
 

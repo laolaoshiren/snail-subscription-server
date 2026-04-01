@@ -45,6 +45,7 @@ const DOCKER_UPDATE_ENV_KEYS = Object.freeze([
   "SNAIL_DOCKER_SOCKET_PATH",
   "SNAIL_DOCKER_COMMAND",
   "SNAIL_DOCKER_COMMAND_ARGS",
+  "SNAIL_DOCKER_NETWORK_MODE",
   "SNAIL_UPDATE_REPO_OWNER",
   "SNAIL_UPDATE_REPO_NAME",
   "SNAIL_UPDATE_BRANCH",
@@ -190,6 +191,7 @@ function getDockerUpdateContext() {
       trimGitRefValue(process.env.SNAIL_DOCKER_HOST_DATA_DIR || "") ||
       trimGitRefValue(process.env.SNAIL_DATA_DIR || process.env.ACCOUNT_DATA_DIR || ""),
     socketPath: DEFAULT_DOCKER_SOCKET_PATH,
+    networkMode: trimGitRefValue(process.env.SNAIL_DOCKER_NETWORK_MODE || "bridge") || "bridge",
     port: trimGitRefValue(process.env.PORT || ""),
   };
 }
