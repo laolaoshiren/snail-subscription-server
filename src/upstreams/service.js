@@ -200,6 +200,54 @@ function getRegistrationAgeMinutes(record, usage) {
   return (Date.now() - timestamp) / 60000;
 }
 
+function normalizeSubscriptionUrlHost(value = "") {
+  const source = (value || "").toString().trim();
+  if (!source) {
+    return "";
+  }
+
+  try {
+    return new URL(source).hostname.toLowerCase();
+  } catch {
+    return "";
+  }
+}
+
+function isIpAddressHost(host = "") {
+  return /^\d{1,3}(?:\.\d{1,3}){3}$/.test((host || "").toString().trim());
+}
+
+function shouldPreferUsageSubscriptionUrl(recordSubscribeUrl = "", usageSubscribeUrl = "") {
+  const normalizedRecord = (recordSubscribeUrl || "").toString().trim();
+  const normalizedUsage = (usageSubscribeUrl || "").toString().trim();
+  if (!normalizedUsage) {
+    return false;
+  }
+  if (!normalizedRecord) {
+    return true;
+  }
+
+  const recordHost = normalizeSubscriptionUrlHost(normalizedRecord);
+  const usageHost = normalizeSubscriptionUrlHost(normalizedUsage);
+  if (!usageHost) {
+    return false;
+  }
+  if (!recordHost) {
+    return true;
+  }
+  if (recordHost === usageHost) {
+    return normalizedUsage !== normalizedRecord;
+  }
+  if (isIpAddressHost(recordHost) && !isIpAddressHost(usageHost)) {
+    return true;
+  }
+  if (!recordHost.includes("susnaillink") && usageHost.includes("susnaillink")) {
+    return true;
+  }
+
+  return false;
+}
+
 function mergeRegistrationWithUsage(record, usage) {
   if (!record) {
     return null;
@@ -215,15 +263,21 @@ function mergeRegistrationWithUsage(record, usage) {
     usage?.clientUrls && typeof usage.clientUrls === "object" && Object.keys(usage.clientUrls).length > 0
       ? usage.clientUrls
       : null;
+  const preferredSubscribeUrl = shouldPreferUsageSubscriptionUrl(recordSubscribeUrl, usageSubscribeUrl)
+    ? usageSubscribeUrl
+    : recordSubscribeUrl || usageSubscribeUrl || record.subscribeUrl;
+  const preferredClientUrls = shouldPreferUsageSubscriptionUrl(
+    (recordClientUrls?.universal || recordSubscribeUrl || "").toString(),
+    (usageClientUrls?.universal || usageSubscribeUrl || "").toString(),
+  )
+    ? usageClientUrls || recordClientUrls || record.clientUrls
+    : recordClientUrls || usageClientUrls || record.clientUrls;
 
   return {
     ...record,
     email: record.email || usage?.email || "",
-    // Preserve the registration-time subscription URLs whenever they already exist.
-    // Some upstream status endpoints return a reduced subscribe_url that is valid but
-    // does not match the full node set that the registration step verified.
-    subscribeUrl: recordSubscribeUrl || usageSubscribeUrl || record.subscribeUrl,
-    clientUrls: recordClientUrls || usageClientUrls || record.clientUrls,
+    subscribeUrl: preferredSubscribeUrl,
+    clientUrls: preferredClientUrls,
     upstreamSite: record.upstreamSite || usage?.upstreamSite || "",
     apiBase: record.apiBase || usage?.apiBase || "",
     entryUrl: record.entryUrl || usage?.entryUrl || "",

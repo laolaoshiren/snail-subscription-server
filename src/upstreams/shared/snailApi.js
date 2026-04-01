@@ -18,16 +18,21 @@ const FETCH_TIMEOUT_MS = Number.parseInt(process.env.FETCH_TIMEOUT_MS || "15000"
 const CONFIG_FETCH_TIMEOUT_MS = Number.parseInt(process.env.SNAIL_CONFIG_FETCH_TIMEOUT_MS || "5000", 10);
 const CONFIG_CACHE_TTL_MS = Number.parseInt(process.env.SNAIL_CONFIG_CACHE_TTL_MS || "600000", 10);
 const SUBSCRIPTION_VERIFY_ATTEMPTS = Number.parseInt(
-  process.env.SNAIL_SUBSCRIPTION_VERIFY_ATTEMPTS || "3",
+  process.env.SNAIL_SUBSCRIPTION_VERIFY_ATTEMPTS || "10",
   10,
 );
 const SUBSCRIPTION_VERIFY_DELAY_MS = Number.parseInt(
-  process.env.SNAIL_SUBSCRIPTION_VERIFY_DELAY_MS || "1200",
+  process.env.SNAIL_SUBSCRIPTION_VERIFY_DELAY_MS || "3000",
   10,
+);
+const SUBSCRIPTION_READY_MIN_NODES = Math.max(
+  1,
+  Number.parseInt(process.env.SNAIL_SUBSCRIPTION_READY_MIN_NODES || "2", 10) || 2,
 );
 const DEFAULT_EMAIL_DOMAIN =
   (process.env.SNAIL_EMAIL_DOMAIN || "gmail.com").toString().trim().replace(/^@+/, "") || "gmail.com";
 const { ensureProxyConfigured } = require("../../httpClient");
+const { BROWSER_UA } = require("./upstreamUtils");
 const upstreamConfigCache = new Map();
 
 const URL_TYPES = Object.freeze({
@@ -38,6 +43,62 @@ const URL_TYPES = Object.freeze({
   quantumultx: "quantumultx",
   "sing-box": "sing-box",
 });
+const SUBSCRIPTION_FETCH_ACCEPT =
+  "text/plain, application/yaml, application/x-yaml, text/yaml, application/json, */*";
+const SUBSCRIPTION_FETCH_PROFILES = {
+  browser: {
+    key: "browser",
+    headers: {
+      Accept: SUBSCRIPTION_FETCH_ACCEPT,
+      "User-Agent": BROWSER_UA,
+      "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+    },
+  },
+  clash: {
+    key: "clash",
+    headers: {
+      Accept: SUBSCRIPTION_FETCH_ACCEPT,
+      "User-Agent": "Clash",
+      "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+    },
+  },
+  mihomo: {
+    key: "mihomo",
+    headers: {
+      Accept: SUBSCRIPTION_FETCH_ACCEPT,
+      "User-Agent": "Mihomo",
+      "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+    },
+  },
+  shadowrocket: {
+    key: "shadowrocket",
+    headers: {
+      Accept: SUBSCRIPTION_FETCH_ACCEPT,
+      "User-Agent": "Shadowrocket/2.2.77",
+      "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+    },
+  },
+  quantumultx: {
+    key: "quantumultx",
+    headers: {
+      Accept: SUBSCRIPTION_FETCH_ACCEPT,
+      "User-Agent": "Quantumult X",
+      "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+    },
+  },
+  clashVerge: {
+    key: "clashVerge",
+    headers: {
+      Accept: SUBSCRIPTION_FETCH_ACCEPT,
+      "User-Agent": "clash-verge/v1.7.7",
+      "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+    },
+  },
+};
+const SUBSCRIPTION_FETCH_PROFILE_KEYS_BY_TYPE = {
+  universal: ["mihomo", "quantumultx", "shadowrocket", "browser"],
+  clash: ["mihomo", "clash", "clashVerge", "shadowrocket", "browser"],
+};
 
 function createLogger(enabled, logger = console) {
   return {
@@ -484,8 +545,46 @@ function buildFlaggedSubscribeUrl(subscribeUrl, type) {
   return `${subscribeUrl}${subscribeUrl.includes("?") ? "&" : "?"}flag=${encodeURIComponent(type)}`;
 }
 
-async function fetchSubscriptionText(url) {
+function buildSubscriptionProbeProfiles(type = "") {
+  const normalizedType = (type || "").toString().trim().toLowerCase();
+  const profileKeys = [
+    ...(SUBSCRIPTION_FETCH_PROFILE_KEYS_BY_TYPE[normalizedType] || []),
+    "browser",
+  ];
+  const seen = new Set();
+
+  return profileKeys
+    .map((key) => {
+      const profile = SUBSCRIPTION_FETCH_PROFILES[key];
+      if (!profile || seen.has(profile.key)) {
+        return null;
+      }
+      seen.add(profile.key);
+      return profile;
+    })
+    .filter(Boolean);
+}
+
+function normalizeSubscriptionUrlHost(value = "") {
+  const source = (value || "").toString().trim();
+  if (!source) {
+    return "";
+  }
+
+  try {
+    return new URL(source).hostname.toLowerCase();
+  } catch {
+    return "";
+  }
+}
+
+function isIpAddressHost(host = "") {
+  return /^\d{1,3}(?:\.\d{1,3}){3}$/.test((host || "").toString().trim());
+}
+
+async function fetchSubscriptionText(url, headers = {}) {
   const response = await fetch(url, {
+    headers,
     signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
   });
   return {
@@ -495,47 +594,112 @@ async function fetchSubscriptionText(url) {
   };
 }
 
+async function probeSubscriptionReadinessByType(subscribeUrl, type) {
+  const url = buildFlaggedSubscribeUrl(subscribeUrl, type);
+  const profiles = buildSubscriptionProbeProfiles(type);
+  const probeResults = await Promise.all(
+    profiles.map(async (profile) => {
+      try {
+        const response = await fetchSubscriptionText(url, profile.headers || {});
+        const nodeCount =
+          response.ok
+            ? (type === "clash"
+              ? countClashSubscriptionNodes(response.body)
+              : countUniversalSubscriptionNodes(response.body))
+            : 0;
+        return {
+          ok: response.ok,
+          status: response.status,
+          nodeCount,
+          profileKey: profile.key,
+        };
+      } catch (error) {
+        return {
+          ok: false,
+          status: 0,
+          nodeCount: 0,
+          profileKey: profile.key,
+          error: error.message,
+        };
+      }
+    }),
+  );
+  probeResults.sort((left, right) => {
+    if ((right.nodeCount || 0) !== (left.nodeCount || 0)) {
+      return (right.nodeCount || 0) - (left.nodeCount || 0);
+    }
+    if (left.ok !== right.ok) {
+      return right.ok ? 1 : -1;
+    }
+    return 0;
+  });
+
+  const bestResult = probeResults[0] || null;
+  if (bestResult && (bestResult.nodeCount || 0) >= SUBSCRIPTION_READY_MIN_NODES) {
+    return {
+      ready: true,
+      verifiedType: type,
+      nodeCount: bestResult.nodeCount || 0,
+      profileKey: bestResult.profileKey || "",
+    };
+  }
+
+  if (bestResult?.ok) {
+    return {
+      ready: false,
+      reason: `Subscription returned only ${bestResult.nodeCount || 0} ${type} nodes via ${bestResult.profileKey || "default"} profile.`,
+      verifiedType: type,
+      nodeCount: bestResult.nodeCount || 0,
+      profileKey: bestResult.profileKey || "",
+    };
+  }
+
+  return {
+    ready: false,
+    reason: bestResult?.error || `Subscription request failed for ${type}.`,
+    verifiedType: type,
+    nodeCount: 0,
+    profileKey: bestResult?.profileKey || "",
+  };
+}
+
 async function verifySubscriptionReadiness(subscribeUrl) {
-  const universalUrl = buildFlaggedSubscribeUrl(subscribeUrl, "universal");
-
-  try {
-    const universal = await fetchSubscriptionText(universalUrl);
-    const universalNodeCount = universal.ok ? countUniversalSubscriptionNodes(universal.body) : 0;
-    if (universalNodeCount > 0) {
-      return {
-        ready: true,
-        verifiedType: "universal",
-        nodeCount: universalNodeCount,
-      };
-    }
-  } catch (error) {
-    // Fall through to clash verification.
+  const universal = await probeSubscriptionReadinessByType(subscribeUrl, "universal").catch((error) => ({
+    ready: false,
+    reason: error.message,
+    verifiedType: "universal",
+    nodeCount: 0,
+    profileKey: "",
+  }));
+  if (universal.ready) {
+    return universal;
   }
 
-  const clashUrl = buildFlaggedSubscribeUrl(subscribeUrl, "clash");
-  try {
-    const clash = await fetchSubscriptionText(clashUrl);
-    const clashNodeCount = clash.ok ? countClashSubscriptionNodes(clash.body) : 0;
-    if (clashNodeCount > 0) {
-      return {
-        ready: true,
-        verifiedType: "clash",
-        nodeCount: clashNodeCount,
-      };
-    }
-
-    return {
-      ready: false,
-      reason: clash.ok
-        ? "Subscription returned an empty clash node list."
-        : `Subscription request failed with status ${clash.status}.`,
-    };
-  } catch (error) {
-    return {
-      ready: false,
-      reason: error.message,
-    };
+  const clash = await probeSubscriptionReadinessByType(subscribeUrl, "clash").catch((error) => ({
+    ready: false,
+    reason: error.message,
+    verifiedType: "clash",
+    nodeCount: 0,
+    profileKey: "",
+  }));
+  if (clash.ready) {
+    return clash;
   }
+
+  const host = normalizeSubscriptionUrlHost(subscribeUrl);
+  const hostHint =
+    host && isIpAddressHost(host)
+      ? `Subscription host ${host} is still an IP placeholder.`
+      : host
+        ? `Subscription host ${host} is not ready yet.`
+        : "";
+  return {
+    ready: false,
+    reason: [universal.reason, clash.reason, hostHint].filter(Boolean).join(" "),
+    verifiedType: clash.verifiedType || universal.verifiedType || "",
+    nodeCount: Math.max(universal.nodeCount || 0, clash.nodeCount || 0),
+    profileKey: clash.profileKey || universal.profileKey || "",
+  };
 }
 
 async function fetchVerifiedSubscriptionUrl(apiBase, token, logger) {
@@ -551,6 +715,9 @@ async function fetchVerifiedSubscriptionUrl(apiBase, token, logger) {
     if (subscribeUrl) {
       const verification = await verifySubscriptionReadiness(subscribeUrl);
       if (verification.ready) {
+        logger.log(
+          `[upstream] Subscription ready via ${verification.verifiedType} (${verification.profileKey || "default"}) with ${verification.nodeCount} nodes: ${subscribeUrl}`,
+        );
         return subscribeUrl;
       }
 
