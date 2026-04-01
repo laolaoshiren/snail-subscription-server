@@ -1598,27 +1598,6 @@ function isSnailDefaultUpstream(source = {}) {
   return (source?.upstreamId || "").toString().trim() === "snail-default";
 }
 
-function shouldRedirectRelayToUpstream(source = {}, type = "") {
-  if (!isSnailDefaultUpstream(source)) {
-    return false;
-  }
-
-  const latestRegistration = source?.userState?.latestRegistration;
-  if (!latestRegistration || latestRegistration.mock) {
-    return false;
-  }
-
-  return Boolean((latestRegistration?.clientUrls?.[type] || "").toString().trim());
-}
-
-function getRelayUpstreamRedirectLocation(source = {}, type = "") {
-  if (!shouldRedirectRelayToUpstream(source, type)) {
-    return "";
-  }
-
-  return (source?.userState?.latestRegistration?.clientUrls?.[type] || "").toString().trim();
-}
-
 function isDegradedSnailServerNodeCount(upstreamId = "", nodeCount = 0) {
   const parsedNodeCount = Number.parseInt(nodeCount, 10);
   return (upstreamId || "").toString().trim() === "snail-default"
@@ -3244,31 +3223,6 @@ async function proxyScopedUpstreamSubscription(response, request, type, relayUse
     upstreamConfig,
     userState,
   };
-  const redirectLocation = getRelayUpstreamRedirectLocation(scopedSource, type);
-  if (redirectLocation) {
-    await appendUserHistory(relayUser.key, normalizedUpstreamId, {
-      action: "relay_success",
-      title: "Scoped relay redirected to upstream.",
-      message: `Client fetched ${type} subscription via upstream redirect.`,
-      relayType: type,
-      requestSource: "relay",
-      registration: userState.latestRegistration,
-      usage: userState.latestUsage || null,
-      details: {
-        scopedRelay: true,
-        upstreamId: normalizedUpstreamId,
-        redirected: true,
-      },
-    });
-    response.writeHead(302, {
-      Location: redirectLocation,
-      "Cache-Control": "no-store, max-age=0, must-revalidate",
-      Pragma: "no-cache",
-    });
-    response.end();
-    return;
-  }
-
   const payload = await fetchResolvedSubscriptionSource(
     scopedSource,
     type,
@@ -4091,64 +4045,6 @@ async function runAggregatePreRegistrationCycle(trigger = "scheduled") {
   return aggregatePreRegistrationJob;
 }
 
-async function tryServeSingleAggregateUpstreamRedirect(
-  response,
-  request,
-  type,
-  relayUser,
-  configuredTargets = [],
-) {
-  if (!Array.isArray(configuredTargets) || configuredTargets.length !== 1) {
-    return false;
-  }
-
-  const target = configuredTargets[0];
-  if (!target?.upstreamId) {
-    return false;
-  }
-
-  let resolvedState = null;
-  try {
-    resolvedState = await resolveRelayState(relayUser.key, target.upstreamId, type, target);
-  } catch {
-    return false;
-  }
-
-  const aggregateSource = {
-    ...target,
-    ...resolvedState,
-  };
-  const redirectLocation = getRelayUpstreamRedirectLocation(aggregateSource, type);
-  if (!redirectLocation) {
-    return false;
-  }
-
-  await appendUserHistory(relayUser.key, target.storageKey || target.upstreamId, {
-    action: "relay_success",
-    title: "Aggregate relay redirected to upstream.",
-    message: `Client fetched ${type} aggregate subscription via upstream redirect.`,
-    mode: ACTIVE_UPSTREAM_MODES.AGGREGATE,
-    relayType: type,
-    requestSource: "relay",
-    registration: aggregateSource?.userState?.latestRegistration || null,
-    usage: aggregateSource?.userState?.latestUsage || null,
-    details: {
-      aggregate: true,
-      redirected: true,
-      instanceLabel: target.instanceLabel || target.upstreamId,
-      storageKey: target.storageKey || target.upstreamId,
-    },
-  }).catch(() => undefined);
-
-  response.writeHead(302, {
-    Location: redirectLocation,
-    "Cache-Control": "no-store, max-age=0, must-revalidate",
-    Pragma: "no-cache",
-  });
-  response.end();
-  return true;
-}
-
 async function tryServeAggregatePreRegistrationCache(response, request, type, relayUser, runtime) {
   const preRegistration = getAggregatePreRegistrationSettings(runtime?.upstreamAggregation);
   if (
@@ -4170,9 +4066,6 @@ async function tryServeAggregatePreRegistrationCache(response, request, type, re
   }
 
   if (!hasUsableCache) {
-    if (await tryServeSingleAggregateUpstreamRedirect(response, request, type, relayUser, configuredTargets)) {
-      return true;
-    }
     sendEmptyAggregateSubscription(response, request, type, runtime);
     return true;
   }
@@ -4978,34 +4871,6 @@ async function proxySubscription(response, request, type, url) {
         upstreamConfig,
         userState,
       };
-      const redirectLocation =
-        candidateUpstreamIds.length === 1
-          ? getRelayUpstreamRedirectLocation(relaySource, type)
-          : "";
-      if (redirectLocation) {
-        await appendUserHistory(relayUser.key, upstreamId, {
-          action: "relay_success",
-          title: "Relay redirected to upstream.",
-          message: `Client fetched ${type} subscription via upstream redirect.`,
-          mode: runtimeMode,
-          relayType: type,
-          requestSource: "relay",
-          registration: latest,
-          usage: userState.latestUsage,
-          details: {
-            redirected: true,
-            upstreamId,
-          },
-        });
-        response.writeHead(302, {
-          Location: redirectLocation,
-          "Cache-Control": "no-store, max-age=0, must-revalidate",
-          Pragma: "no-cache",
-        });
-        response.end();
-        return;
-      }
-
       const payload = await fetchResolvedSubscriptionSource(
         relaySource,
         type,
