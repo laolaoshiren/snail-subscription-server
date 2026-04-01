@@ -88,6 +88,7 @@ const sessions = new Map();
 let aggregatePreRegistrationTimer = null;
 let aggregatePreRegistrationJob = null;
 let aggregatePreRegistrationImmediateRequested = false;
+let directFetchDispatcher = null;
 
 const RELAY_TYPES = Object.keys(URL_TYPES);
 const SUPPORTED_TYPES = new Set(["full", ...RELAY_TYPES]);
@@ -1382,12 +1383,138 @@ function normalizeRequestTimeoutMs(timeoutMs, fallbackMs = RELAY_FETCH_TIMEOUT_M
   return Math.max(1, Math.min(parsed, fallbackMs));
 }
 
-async function fetchUpstreamSubscription(upstreamUrl, timeoutMs = RELAY_FETCH_TIMEOUT_MS) {
+function getDirectFetchDispatcher() {
+  if (directFetchDispatcher) {
+    return directFetchDispatcher;
+  }
+
+  const { Agent } = require("undici");
+  directFetchDispatcher = new Agent({
+    connect: {
+      rejectUnauthorized: false,
+    },
+  });
+  return directFetchDispatcher;
+}
+
+async function fetchUpstreamSubscription(upstreamUrl, timeoutMs = RELAY_FETCH_TIMEOUT_MS, options = {}) {
   ensureProxyConfigured();
 
-  return fetch(upstreamUrl, {
+  const requestOptions = {
     signal: AbortSignal.timeout(normalizeRequestTimeoutMs(timeoutMs)),
+  };
+  if (options.direct === true) {
+    requestOptions.dispatcher = getDirectFetchDispatcher();
+  }
+
+  return fetch(upstreamUrl, requestOptions);
+}
+
+function countSubscriptionNodes(type, bodyBuffer) {
+  const rawBody = Buffer.isBuffer(bodyBuffer) ? bodyBuffer.toString("utf8").trim() : "";
+  if (!rawBody) {
+    return 0;
+  }
+
+  if (type === "clash") {
+    try {
+      const parsed = yaml.load(rawBody);
+      if (Array.isArray(parsed)) {
+        return parsed.filter((item) => item && typeof item === "object").length;
+      }
+      return Array.isArray(parsed?.proxies) ? parsed.proxies.length : 0;
+    } catch {
+      return 0;
+    }
+  }
+
+  if (type === "sing-box") {
+    try {
+      const parsed = JSON.parse(rawBody);
+      return Array.isArray(parsed?.outbounds) ? parsed.outbounds.length : 0;
+    } catch {
+      return 0;
+    }
+  }
+
+  const decoded = tryDecodeBase64(rawBody);
+  const subscriptionText = decoded && /:\/\//.test(decoded) ? decoded : rawBody;
+  return subscriptionText
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => /:\/\//.test(line))
+    .length;
+}
+
+async function fetchPreferredSubscriptionPayload(type, upstreamUrl, requestTimeoutMs, requestMethod = "GET") {
+  const attemptConfigs = [
+    { key: "direct", direct: true },
+    { key: "proxy", direct: false },
+  ];
+  const attemptResults = await Promise.all(
+    attemptConfigs.map(async (config) => {
+      try {
+        const response = await fetchUpstreamSubscription(upstreamUrl, requestTimeoutMs, {
+          direct: config.direct,
+        });
+        if (!response.ok) {
+          return {
+            key: config.key,
+            ok: false,
+            status: response.status,
+            error: new Error(`Upstream subscription request failed with status ${response.status}.`),
+          };
+        }
+
+        const headers = {};
+        response.headers.forEach((value, key) => {
+          const normalizedKey = key.toLowerCase();
+          if (FORWARDED_HEADERS.has(normalizedKey)) {
+            headers[normalizedKey] = value;
+          }
+        });
+
+        const body =
+          requestMethod === "HEAD"
+            ? Buffer.alloc(0)
+            : await normalizeSubscriptionPayload(type, Buffer.from(await response.arrayBuffer()));
+
+        return {
+          key: config.key,
+          ok: true,
+          headers,
+          body,
+          nodeCount: requestMethod === "HEAD" ? 0 : countSubscriptionNodes(type, body),
+        };
+      } catch (error) {
+        return {
+          key: config.key,
+          ok: false,
+          status: error?.status || null,
+          error,
+        };
+      }
+    }),
+  );
+
+  const successful = attemptResults.filter((entry) => entry.ok);
+  if (successful.length === 0) {
+    const proxyFailure = attemptResults.find((entry) => entry.key === "proxy" && entry.error);
+    const directFailure = attemptResults.find((entry) => entry.key === "direct" && entry.error);
+    throw proxyFailure?.error || directFailure?.error || new Error("Upstream subscription request failed.");
+  }
+
+  successful.sort((left, right) => {
+    if ((right.nodeCount || 0) !== (left.nodeCount || 0)) {
+      return (right.nodeCount || 0) - (left.nodeCount || 0);
+    }
+    if (left.key === right.key) {
+      return 0;
+    }
+    return left.key === "direct" ? -1 : 1;
   });
+
+  return successful[0];
 }
 
 async function fetchFallbackSubscriptionUserInfoHeader(
@@ -2303,14 +2430,11 @@ async function probeUpstreamSubscription(record, supportedTypes = []) {
     };
   }
 
-  const response = await fetchUpstreamSubscription(record.clientUrls[probeType]);
-  if (!response.ok) {
-    throw new Error(`Subscription request failed with status ${response.status}.`);
-  }
-
-  await normalizeSubscriptionPayload(
+  await fetchPreferredSubscriptionPayload(
     probeType,
-    Buffer.from(await response.arrayBuffer()),
+    record.clientUrls[probeType],
+    RELAY_FETCH_TIMEOUT_MS,
+    "GET",
   );
 
   return {
@@ -2633,22 +2757,15 @@ async function fetchResolvedSubscriptionSource(source, type, requestMethod = "GE
     };
   }
 
-  const upstreamResponse = await fetchUpstreamSubscription(upstreamUrl, requestTimeoutMs);
-  if (!upstreamResponse.ok) {
-    const nextError = new Error(
-      `Upstream subscription request failed with status ${upstreamResponse.status}.`,
-    );
-    nextError.status = upstreamResponse.status;
-    throw nextError;
-  }
-
-  const headers = {};
-  upstreamResponse.headers.forEach((value, key) => {
-    const normalizedKey = key.toLowerCase();
-    if (FORWARDED_HEADERS.has(normalizedKey)) {
-      headers[normalizedKey] = value;
-    }
-  });
+  const preferredPayload = await fetchPreferredSubscriptionPayload(
+    type,
+    upstreamUrl,
+    requestTimeoutMs,
+    requestMethod,
+  );
+  const headers = {
+    ...(preferredPayload.headers || {}),
+  };
 
   if (!headers["subscription-userinfo"]) {
     const fallbackUserInfoHeader = await fetchFallbackSubscriptionUserInfoHeader(
@@ -2667,10 +2784,7 @@ async function fetchResolvedSubscriptionSource(source, type, requestMethod = "GE
     headers["content-type"] || "text/plain; charset=utf-8",
   );
 
-  const body =
-    requestMethod === "HEAD"
-      ? Buffer.alloc(0)
-      : await normalizeSubscriptionPayload(type, Buffer.from(await upstreamResponse.arrayBuffer()));
+  const body = requestMethod === "HEAD" ? Buffer.alloc(0) : preferredPayload.body;
 
   return {
     headers,
